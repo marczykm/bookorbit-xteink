@@ -233,7 +233,7 @@ int fastRefreshes = 0;
 enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
-int settingsSel = 0;  // Settings list: 0 = Wi-Fi on/off, 1 = Wi-Fi network, 2 = companion, 3 = sleep timer
+int settingsSel = 0;  // Settings list: Wi-Fi on/off, network, server, username, password, companion, sleep timer
 int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
@@ -812,11 +812,12 @@ static void setSleep(int minutes) {
 static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
-  const char* names[4] = {"Wi-Fi", "Network", "Companion", "Sleep after"};
+  const char* names[7] = {"Wi-Fi", "Network", "Server", "Username", "Password", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
-  String ssidText = config.ssid;
-  const String values[4] = {wifiValue(), ssidText, pets::kNames[petIndex], sleepText};
-  for (int i = 0; i < 4; i++) {
+  String stars;
+  for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
+  const String values[7] = {wifiValue(), config.ssid, config.server, config.username, stars, pets::kNames[petIndex], sleepText};
+  for (int i = 0; i < 7; i++) {
     const int y = kListTop + i * 72;
     const bool sel = i == settingsSel;
     if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 64, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 64);
@@ -827,11 +828,9 @@ static void drawSettings(bool full) {
   }
   // About: read-only facts.
   char line[96];
-  int y = kListTop + 4 * 72 + 14;
-  gfx::text(kMargin, y, "Server");
-  gfx::text(kMargin, y + 28, gfx::ellipsize(config.server.c_str(), gfx::W - 2 * kMargin));
+  int y = kListTop + 7 * 72 + 14;
   snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
-  gfx::text(kMargin, y + 70, line);
+  gfx::text(kMargin, y, line);
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -899,7 +898,8 @@ constexpr int kMaxScan = 12;
 ScanEntry scanList[kMaxScan];
 int scanCount = 0, netSel = 0, netTop = 0;
 String pendingSsid, kbText;
-bool kbForSsid = false;  // the keyboard is typing a network name ("Other network"), not a password
+enum KbTarget { KbSsid, KbWifiPassword, KbServer, KbUsername, KbPassword };
+int kbTarget = KbWifiPassword;  // what the keyboard is typing
 int kbMode = 0;          // 0 lower case, 1 upper case (one letter), 2 symbols
 int kbRow = 1, kbCol = 0;
 
@@ -925,6 +925,47 @@ static void saveWifiCreds(const String& ssid, const String& password) {
   config.ssid = ssid;
   config.wifiPassword = password;
   startWifi();
+}
+
+// Server address, username and password: stored in /bookorbit.json, then the app signs in again with them.
+static bool saveAccountField(int target, String value) {
+  if (target == KbServer) {
+    value.trim();
+    while (value.endsWith("/")) value.remove(value.length() - 1);
+    if (!value.startsWith("http://") && !value.startsWith("https://")) return false;
+    if (value.length() < 12) return false;
+  }
+  JsonDocument doc;
+  if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
+  bool serverChanged = false;
+  if (target == KbServer) {
+    serverChanged = value != config.server;
+    doc["server"] = value;
+    config.server = value;
+  } else if (target == KbUsername) {
+    doc["username"] = value;
+    config.username = value;
+  } else {
+    doc["password"] = value;
+    config.password = value;
+  }
+  String json;
+  serializeJsonPretty(doc, json);
+  SdMan.writeFile("/bookorbit.json", json);
+  api.configure(config.server, config.insecureTls);
+  if (serverChanged) {  // another server: its books, covers and numbers are different
+    SdMan.removeDir("/BookOrbit/.covers");
+    SdMan.removeDir("/BookOrbit/.library");
+    SdMan.remove(kStatsFile);
+    stats = Stats();
+    bookCount = bookTotal = 0;
+  }
+  if (!SdMan.exists(kWifiOffFlag)) {  // sign in again in the background
+    if (WiFi.getMode() == WIFI_OFF) startWifi();
+    net = Net::Connecting;
+    netStart = millis();
+  }
+  return true;
 }
 
 static void scanForNetworks() {
@@ -994,8 +1035,8 @@ constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330, kKbX = 20;
 // Bottom row: mode switch, space, cancel, done.
 constexpr int kBottomX[4] = {20, 130, 268, 368}, kBottomW[4] = {100, 128, 90, 92};
 
-static void openKeyboard(bool forSsid, const String& startText) {
-  kbForSsid = forSsid;
+static void openKeyboard(int target, const String& startText) {
+  kbTarget = target;
   kbText = startText;
   kbMode = 0;
   kbRow = 1;
@@ -1006,8 +1047,10 @@ static void openKeyboard(bool forSsid, const String& startText) {
 
 static void drawKeyboard(bool full) {
   gfx::clear();
-  header(kbForSsid ? "Network name" : "Wi-Fi password");
-  if (!kbForSsid) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
+  static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
+  header(titles[kbTarget]);
+  if (kbTarget == KbWifiPassword) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
+  if (kbTarget == KbServer) gfx::text(kMargin, 66, "e.g. http://192.168.1.4:3000");
   frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
   // The text field shows the end of what was typed, with a cursor.
   String shown = kbText;
@@ -1057,14 +1100,19 @@ static bool keyboardPress() {
   switch (kbCol) {
     case 0: kbMode = (kbMode + 1) % 3; return false;
     case 1: kbText += ' '; return false;
-    case 2: screen = Screen::Networks; return true;  // cancel: back to the list
+    case 2:  // cancel
+      screen = (kbTarget == KbSsid || kbTarget == KbWifiPassword) ? Screen::Networks : Screen::Settings;
+      return true;
     default:
-      if (kbForSsid) {
+      if (kbTarget == KbSsid) {
         if (kbText.isEmpty()) return false;
         pendingSsid = kbText;
-        openKeyboard(false, "");  // now the password
-      } else {
+        openKeyboard(KbWifiPassword, "");  // now the password
+      } else if (kbTarget == KbWifiPassword) {
         saveWifiCreds(pendingSsid, kbText);
+        screen = Screen::Settings;
+      } else {
+        if (!saveAccountField(kbTarget, kbText)) return false;  // e.g. an address that is not http(s)://
         screen = Screen::Settings;
       }
       return true;
@@ -1074,7 +1122,7 @@ static bool keyboardPress() {
 static void networkChosen() {
   if (netSel >= scanCount) {  // other network: type its name first
     pendingSsid = "";
-    openKeyboard(true, "");
+    openKeyboard(KbSsid, "");
     return;
   }
   pendingSsid = scanList[netSel].ssid;
@@ -1083,7 +1131,7 @@ static void networkChosen() {
     screen = Screen::Settings;
     showList(false);
   } else {
-    openKeyboard(false, "");
+    openKeyboard(KbWifiPassword, "");
   }
 }
 
@@ -1625,7 +1673,7 @@ void loop() {
     } else if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 3) {
+    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 6) {
       settingsSel++;
       showList(false);
     } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
@@ -1636,8 +1684,14 @@ void loop() {
         toggleWifi();  // redraws by itself
       } else if (settingsSel == 1) {
         openNetworks();
+      } else if (settingsSel == 2) {
+        openKeyboard(KbServer, config.server.isEmpty() ? String("http://") : config.server);
+      } else if (settingsSel == 3) {
+        openKeyboard(KbUsername, config.username);
+      } else if (settingsSel == 4) {
+        openKeyboard(KbPassword, config.password);
       } else {
-        openPicker(settingsSel == 2 ? 0 : 1);
+        openPicker(settingsSel == 5 ? 0 : 1);
         showList(false);
       }
     }
