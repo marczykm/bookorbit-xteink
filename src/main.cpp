@@ -816,7 +816,7 @@ static void drawSettings(bool full) {
   header("Settings");
   // Rows are grouped under section headings; settingsSel counts rows only.
   const char* sectionOf[8] = {"Wi-Fi", nullptr, "Account", nullptr, nullptr, "Device", nullptr, nullptr};  // heading above the row
-  const char* names[8] = {"Wi-Fi", "Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
+  const char* names[8] = {"WiFi radio", "Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
   String stars;
   for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
