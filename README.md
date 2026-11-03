@@ -7,6 +7,8 @@ CrossPoint reader repo, commit 2ec01c9): display driver, input, battery, SD, EPU
 ## Status
 - Library browser: Wi-Fi, sign-in, paged book list, download to `/BookOrbit/` (`http://` or `https://`).
 - EPUB reader: FreeInkBook layout cached on the SD card (`/BookOrbit/.cache/`), page turns, resume position, images.
+- Library submenu: Home > Library opens All / Authors / Series / Smart scopes. All is the paged book list; the others list authors, series or the user's saved filters (page with Left/Right), and OK shows that entry's books. Back goes up one level. Lists are cached on the SD card for offline browsing.
+- Reader menu: OK while reading opens a menu with Contents and Text size. Contents lists the book's table of contents (current entry starred); OK jumps to the start of that chapter. Text size offers 18-30 px (default 22) and re-lays out the chapter at the same place in the text; it is saved in `/BookOrbit/.fontsize` for all books and each size keeps its own page cache. Back goes up a level, then closes the menu.
 - Opening a book restarts into a Wi-Fi-free reading mode (the original X4 has no PSRAM; the reader needs ~170 KB of heap).
 - Fonts: Noto Serif (regular, bold, italic; Latin + Latin Extended, so Polish works) from a flash partition. The library screens use the same Noto Serif regular face, so Polish titles show correctly (they fall back to an ASCII-only bitmap font if the font pack is missing).
 - Instant start: at power-on and when returning from a book, the cached library page appears at once ("Connecting..." at the bottom) while Wi-Fi, sign-in, progress sync and the list refresh finish in the background; buttons keep working meanwhile.

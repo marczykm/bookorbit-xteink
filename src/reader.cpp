@@ -30,6 +30,8 @@ constexpr uint32_t kFontFingerprintBitmap = 0xB00C0001;  // built-in ASCII font
 constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the flash `fonts` partition; bump when it changes
 constexpr size_t kFaceArena[3] = {14 * 1024, 8 * 1024, 8 * 1024};  // glyph caches: regular, bold, italic
 
+constexpr const char* kFontSizeFile = "/BookOrbit/.fontsize";
+
 class SdBookSource : public BookSource {
  public:
   bool open(const char* path) {
@@ -253,11 +255,30 @@ void savePosition() {
   st->turnsSinceSave = 0;
 }
 
+// Size of one spine file (uncompressed), the best cheap stand-in for how much text it holds.
+static uint32_t spineBytes(int index) {
+  const ManifestItem* item = st->book.spineItem(index);
+  const ZipEntry* entry = item ? st->book.zip().find(item->href) : nullptr;
+  return entry ? max<uint32_t>(1, entry->uncompressedSize) : 1;
+}
+
+// Share of the book's text (0..1) before spine file `index` plus `within` (0..1) of that file.
+static float bookFraction(int index, float within) {
+  const int n = (int)st->book.spineCount();
+  double before = 0, total = 0;
+  for (int i = 0; i < n; i++) {
+    const uint32_t b = spineBytes(i);
+    if (i < index) before += b;
+    total += b;
+  }
+  if (total <= 0) return 0;
+  return (float)((before + within * spineBytes(index)) / total);
+}
+
 float progressPercent() {
   if (!isOpen() || !st->pagesOpen) return 0;
-  const float spines = max<size_t>(1, st->book.spineCount());
   const float pages = max<uint32_t>(1, st->pages.pageCount());
-  return min(100.0f, 100.0f * (st->spine + st->page / pages) / spines);
+  return min(100.0f, 100.0f * bookFraction(st->spine, st->page / pages));
 }
 
 bool open(const char* epubPath, String& error, float serverPercent) {
@@ -318,6 +339,10 @@ bool open(const char* epubPath, String& error, float serverPercent) {
   s.params.marginTop = 24;
   s.params.marginBottom = 56;  // room for the page footer
   s.params.baseSizePx = s.ttf ? 22 : 24;
+  if (s.ttf && SdMan.exists(kFontSizeFile)) {
+    const int px = atoi(SdMan.readFile(kFontSizeFile).c_str());
+    for (int opt : kFontSizes) if (opt == px) s.params.baseSizePx = px;
+  }
   s.params.font = &s.fonts;
   s.params.stylesheet = &s.sheet;
   s.params.defaultAlign = TextAlign::Justify;
@@ -336,9 +361,21 @@ bool open(const char* epubPath, String& error, float serverPercent) {
     if (spine < 0 || spine >= (int)s.book.spineCount()) { spine = 0; chars = 0; }
   }
   if (serverPercent > localPercent + 1.0f) {  // read further on another device: jump there
-    const float pos = min(serverPercent, 99.9f) / 100.0f * s.book.spineCount();
-    spine = (int)pos;
-    seekFraction = pos - spine;
+    const double target = min(serverPercent, 99.9f) / 100.0;
+    double total = 0;
+    for (int i = 0; i < (int)s.book.spineCount(); i++) total += spineBytes(i);
+    double acc = 0;
+    spine = 0;
+    seekFraction = 0;
+    for (int i = 0; i < (int)s.book.spineCount(); i++) {
+      const double b = spineBytes(i);
+      if (acc + b > target * total || i == (int)s.book.spineCount() - 1) {
+        spine = i;
+        seekFraction = (float)min(1.0, max(0.0, (target * total - acc) / b));
+        break;
+      }
+      acc += b;
+    }
     chars = 0;
     Serial.printf("resuming from server position %.1f%% (local %.1f%%)\n", serverPercent, localPercent);
   }
@@ -358,6 +395,7 @@ bool open(const char* epubPath, String& error, float serverPercent) {
 }
 
 void close() {
+  gfx::lendFace(nullptr);
   if (st) {
     savePosition();
     st->source.close();
@@ -390,6 +428,90 @@ void draw(bool full) {
   Serial.printf("rendered in %u ms\n", (unsigned)(millis() - drawStart));
   // "full" is the periodic ghosting cleanup. A half refresh does it with far less flashing than a full one (1.7 s vs 3.8 s).
   gfx::flush(full ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
+}
+
+void uiFont(bool on) {
+  gfx::lendFace(on && isOpen() && st->ttf ? &st->faces[0] : nullptr);
+}
+
+int tocCount() { return isOpen() ? (int)st->book.tocCount() : 0; }
+const char* tocTitle(int i) {
+  const TocEntry* e = isOpen() ? st->book.tocEntry(i) : nullptr;
+  return e ? e->title : "";
+}
+int tocDepth(int i) {
+  const TocEntry* e = isOpen() ? st->book.tocEntry(i) : nullptr;
+  return e ? e->depth : 0;
+}
+
+// The spine file an entry points to, -1 if none matches.
+static int tocSpine(int i) {
+  const TocEntry* e = st->book.tocEntry(i);
+  if (!e || !e->href) return -1;
+  for (int j = 0; j < (int)st->book.spineCount(); j++) {
+    const ManifestItem* item = st->book.spineItem(j);
+    if (item && item->href && strcmp(item->href, e->href) == 0) return j;
+  }
+  return -1;
+}
+
+int tocCurrent() {
+  if (!isOpen()) return -1;
+  int best = -1, bestSpine = -1;
+  for (int i = 0; i < (int)st->book.tocCount(); i++) {
+    const int sp = tocSpine(i);
+    if (sp >= 0 && sp <= st->spine && sp >= bestSpine) { best = i; bestSpine = sp; }
+  }
+  return best;
+}
+
+bool openToc(int i) {
+  if (!isOpen() || !st->pagesOpen) return false;
+  State& s = *st;
+  const int target = tocSpine(i);
+  if (target < 0) return false;
+  String error;
+  busyOnLayout = "Opening chapter...";
+  const int old = s.spine;
+  if (!openChapter(target, error) || s.pages.pageCount() == 0) {
+    busyOnLayout = nullptr;
+    openChapter(old, error);
+    return false;
+  }
+  busyOnLayout = nullptr;
+  s.page = 0;
+  savePosition();
+  draw(true);
+  return true;
+}
+
+int fontSize() { return isOpen() ? st->params.baseSizePx : 0; }
+
+bool setFontSize(int px) {
+  if (!isOpen() || !st->pagesOpen || !st->ttf || px == st->params.baseSizePx) return false;
+  State& s = *st;
+  const int oldSize = s.params.baseSizePx;
+  const uint32_t chars = s.pages.charStart(s.page);  // stay at the same place in the text
+  s.params.baseSizePx = px;
+  s.generation = layoutGenerationHash(s.params, kFontFingerprintTtf);
+  String error;
+  busyOnLayout = "Reflowing...";
+  Serial.printf("font size %d -> %d px\n", oldSize, px);
+  if (!openChapter(s.spine, error)) {
+    Serial.printf("font size change failed: %s\n", error.c_str());
+    busyOnLayout = nullptr;
+    s.params.baseSizePx = oldSize;  // keep reading at the old size
+    s.generation = layoutGenerationHash(s.params, kFontFingerprintTtf);
+    openChapter(s.spine, error);
+    return false;
+  }
+  busyOnLayout = nullptr;
+  s.page = chars ? s.pages.pageForChar(chars) : 0;
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.writeFile(kFontSizeFile, String(px));
+  savePosition();
+  draw(true);
+  return true;
 }
 
 bool next(bool full) {

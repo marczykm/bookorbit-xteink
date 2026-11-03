@@ -38,6 +38,9 @@ RTC_NOINIT_ATTR char readPath[160];
 
 RTC_NOINIT_ATTR float readServerPercent;  // progress the server holds for the book, -1 when unknown
 constexpr uint32_t kLibraryMagic = 0x4C494252;
+RTC_NOINIT_ATTR int32_t openScope;       // which list the book was opened from: a Scope value, plus its id and name
+RTC_NOINIT_ATTR int32_t openScopeId;
+RTC_NOINIT_ATTR char openScopeName[48];
 RTC_NOINIT_ATTR uint32_t openLibraryMagic;  // set when closing a book so the device returns to the library, not Home
 RTC_NOINIT_ATTR long readFileId;  // server file id of the open book, 0 when unknown
 
@@ -228,9 +231,16 @@ constexpr int kListTop = 64;
 
 Book books[kPageSize];
 int bookCount = 0, bookTotal = 0, page = 0, selected = 0;
+Scope src = Scope::All;  // what the book list shows: everything, or one author / series / smart scope
+long srcId = 0;
+char srcName[48] = "";
+Entity entities[kPageSize];  // the browse list of authors / series / smart scopes
+int entCount = 0, entTotal = 0, entPage = 0, entSel = 0;
+Scope entKind = Scope::Author, entLoaded = Scope::All;  // entLoaded: which kind `entities` holds (All = nothing yet)
+int browseSel = 0;
 int fastRefreshes = 0;
 // Which screen is showing. Home is the entry point; Library is its only menu item for now.
-enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard, Confirm } screen = Screen::Home;
+enum class Screen { Home, Browse, Entities, Library, Settings, Picker, Networks, Keyboard, Confirm } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
@@ -291,6 +301,7 @@ static void handleSerial() {
       if (line == "SLEEP") goToSleep();
       if (line == "WIFITOGGLE") { extern void testToggleWifi(); testToggleWifi(); }  // test hook
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
+      if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
       if (line.startsWith("CFG:")) {
@@ -440,7 +451,8 @@ static void drawList(bool full) {
   gfx::clear();
   char title[48];
   const int pages = max(1, (bookTotal + kPageSize - 1) / kPageSize);
-  snprintf(title, sizeof(title), "Library  %d/%d", page + 1, pages);
+  if (src == Scope::All) snprintf(title, sizeof(title), "Library  %d/%d", page + 1, pages);
+  else snprintf(title, sizeof(title), "%s  %d/%d", gfx::ellipsize(srcName, 280), page + 1, pages);
   header(title);
   for (int i = 0; i < bookCount; i++) {
     const int y = kListTop + i * kRowHeight;
@@ -1366,9 +1378,58 @@ static void networkChosen() {
   }
 }
 
+// The Library submenu: all books, or browse by author, series or smart scope.
+static void drawBrowse(bool full) {
+  gfx::clear();
+  header("Library");
+  const char* names[4] = {"All", "Authors", "Series", "Smart scopes"};
+  for (int i = 0; i < 4; i++) {
+    const int y = kListTop + i * kRowHeight;
+    const bool sel = i == browseSel;
+    if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
+    char sub[32] = "";
+    const int n = i == 0 ? stats.books : i == 1 ? stats.authors : i == 2 ? stats.series : 0;
+    if (n > 0) snprintf(sub, sizeof(sub), "%d %s", n, i == 0 ? "books" : i == 1 ? "authors" : "series");
+    if (i == 3) strlcpy(sub, "Saved filters", sizeof(sub));
+    label(kMargin + 4, y + 4, names[i], sel);
+    label(kMargin + 4, y + 4 + gfx::lineHeight() - 2, sub, sel);
+  }
+  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
+  drawHints(true, true, false);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
+static void drawEntities(bool full) {
+  gfx::clear();
+  char title[48];
+  const int pages = max(1, (entTotal + kPageSize - 1) / kPageSize);
+  const char* what = entKind == Scope::Author ? "Authors" : entKind == Scope::Series ? "Series" : "Smart scopes";
+  snprintf(title, sizeof(title), "%s  %d/%d", what, entPage + 1, pages);
+  header(title);
+  for (int i = 0; i < entCount; i++) {
+    const int y = kListTop + i * kRowHeight;
+    const bool sel = i == entSel;
+    if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
+    char sub[24];
+    snprintf(sub, sizeof(sub), entities[i].count == 1 ? "%d book" : "%d books", entities[i].count);
+    label(kMargin + 4, y + 4, gfx::ellipsize(entities[i].name, gfx::W - 2 * kMargin - 8), sel);
+    label(kMargin + 4, y + 4 + gfx::lineHeight() - 2, sub, sel);
+  }
+  if (entCount == 0) gfx::text(kMargin, 120, "Nothing here");
+  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
+  drawHints(true, true, true);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
 static void drawScreen(bool full) {  // draws whichever screen is current
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
+  else if (screen == Screen::Browse) drawBrowse(full);
+  else if (screen == Screen::Entities) drawEntities(full);
   else if (screen == Screen::Settings) drawSettings(full);
   else if (screen == Screen::Picker) drawPicker(full);
   else if (screen == Screen::Networks) drawNetworks(full);
@@ -1411,7 +1472,10 @@ static bool ensureWifi(String& error) {
 }
 
 // The library list is cached per page on the SD card so it can be browsed without a connection.
-static String cachePath(int p) { return "/BookOrbit/.library/9-" + String(p) + ".json"; }
+static String cachePath(int p) {
+  if (src == Scope::All) return "/BookOrbit/.library/9-" + String(p) + ".json";
+  return "/BookOrbit/.library/s" + String((int)src) + "-" + String(srcId) + "-" + String(p) + ".json";
+}
 
 static void saveCachedPage(int p) {
   JsonDocument doc;
@@ -1454,7 +1518,7 @@ static bool loadPage(int newPage, String& error) {
     String netError;
     int total = 0;
     if (ensureWifi(netError)) {
-      const int n = api.listBooks(newPage, kPageSize, books, kPageSize, total, netError);
+      const int n = api.listBooks(newPage, kPageSize, books, kPageSize, total, netError, src, srcId);
       if (n >= 0) {
         bookCount = n;
         bookTotal = total;
@@ -1479,6 +1543,69 @@ static bool loadPage(int newPage, String& error) {
   return false;
 }
 
+static String entityCachePath(Scope kind, int p) { return "/BookOrbit/.library/e" + String((int)kind) + "-" + String(p) + ".json"; }
+
+static bool loadCachedEntities(Scope kind, int p) {
+  const String path = entityCachePath(kind, p);
+  if (!SdMan.exists(path.c_str())) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, SdMan.readFile(path.c_str()))) return false;
+  entTotal = doc["total"] | 0;
+  entCount = 0;
+  for (JsonObject o : doc["items"].as<JsonArray>()) {
+    if (entCount >= kPageSize) break;
+    Entity& e = entities[entCount++];
+    e = Entity();
+    e.id = o["id"] | 0L;
+    strlcpy(e.name, o["name"] | "", sizeof(e.name));
+    e.count = o["count"] | 0;
+  }
+  entKind = kind;
+  entLoaded = kind;
+  entPage = p;
+  entSel = 0;
+  return true;
+}
+
+// One page of authors / series / smart scopes, from the server when online (and cached), else from the cache.
+static bool loadEntities(Scope kind, int p, String& error) {
+  if (net == Net::Online) {
+    String netError;
+    int total = 0;
+    if (ensureWifi(netError)) {
+      const int n = api.listEntities(kind, p, kPageSize, entities, kPageSize, total, netError);
+      if (n >= 0) {
+        entCount = n;
+        entTotal = total;
+        entKind = kind;
+        entLoaded = kind;
+        entPage = p;
+        entSel = 0;
+        JsonDocument doc;
+        doc["total"] = total;
+        for (int i = 0; i < n; i++) {
+          doc["items"][i]["id"] = entities[i].id;
+          doc["items"][i]["name"] = entities[i].name;
+          doc["items"][i]["count"] = entities[i].count;
+        }
+        String json;
+        serializeJson(doc, json);
+        SdMan.ensureDirectoryExists("/BookOrbit");
+        SdMan.ensureDirectoryExists("/BookOrbit/.library");
+        SdMan.writeFile(entityCachePath(kind, p).c_str(), json);
+        return true;
+      }
+    }
+    Serial.printf("browse %d page %d: %s\n", (int)kind, p, netError.c_str());
+    if (loadCachedEntities(kind, p)) return true;
+    error = netError;
+    return false;
+  }
+  if (loadCachedEntities(kind, p)) return true;
+  error = "This list is not cached.\nHold Back to connect.";
+  return false;
+}
+
 static void downloadProgress(size_t done, size_t total) {
   static uint32_t last = 0;
   if (millis() - last < 3000) return;
@@ -1493,6 +1620,20 @@ static void waitForKey() {
   } while (anyCount == 0 && injected < 0);
   injected = -1;
 }
+
+// A framed box over whatever is on screen, for short status notices.
+static void syncModal(const char* title, const String& body) {
+  gfx::waitIdle();
+  const int w = 340, h = 100, x = (gfx::W - w) / 2, y = 320;
+  frame(x, y, w, h, 12);
+  gfx::bigTextCentered(y + 12, title, 28);
+  gfx::bigTextCentered(y + 56, gfx::ellipsize(body.c_str(), w - 32), 20);
+  gfx::flush(EInkDisplay::FAST_REFRESH);
+}
+
+static void backgroundSync();
+
+void testSyncModal() { syncModal("In sync", "Server position: 12%"); }  // test hook
 
 // Opens the selected book, downloading it first when it isn't on the SD card yet.
 static void openBook(const Book& b) {
@@ -1517,10 +1658,35 @@ static void openBook(const Book& b) {
   }
   readMagic = kReadMagic;
   openLibraryMagic = screen == Screen::Library ? kLibraryMagic : 0;  // Back from the book returns to where it was opened
+  openScope = (int32_t)src;
+  openScopeId = (int32_t)srcId;
+  strlcpy(openScopeName, srcName, sizeof(openScopeName));
   readFileId = b.fileId;
   readServerPercent = -1;
-  float serverPct;
-  if (net == Net::Online && b.fileId && ensureWifi(error) && api.getProgress(b.fileId, serverPct, error)) readServerPercent = serverPct;
+  if (b.fileId && net != Net::Offline) {
+    syncModal("Syncing", "Signing in...");
+    const uint32_t t0 = millis();
+    while (net == Net::Connecting && millis() - t0 < 25000) {  // still signing in: wait, so the server's position isn't missed
+      backgroundSync();
+      delay(50);
+    }
+    if (net == Net::Online) {
+      syncModal("Syncing", "Checking your reading position...");
+      float serverPct;
+      if (ensureWifi(error) && api.getProgress(b.fileId, serverPct, error)) {
+        readServerPercent = serverPct;
+        char line[48];
+        snprintf(line, sizeof(line), "Server position: %.0f%%", serverPct);
+        syncModal("In sync", line);
+      } else {
+        syncModal("Sync failed", "Using the position on this device.");
+      }
+      Serial.printf("server progress for file %ld: %.1f%% (%s)\n", b.fileId, readServerPercent, error.c_str());
+    } else {
+      syncModal("Offline", "Using the position on this device.");
+    }
+    delay(900);
+  }
   strlcpy(readPath, path.c_str(), sizeof(readPath));
   Serial.printf("restarting into reader: %s\n", readPath);
   delay(100);
@@ -1584,8 +1750,133 @@ static void closeBook() {
   ESP.restart();  // back to where the book was opened from (see openBook)
 }
 
+// The reader menu (OK while reading): Contents and Text size. Up/Down pick, OK chooses, Back goes up a level.
+enum class RMenu { None, Main, Size, Toc };
+static RMenu readerMenu = RMenu::None;
+static int readerMenuSel = 0, tocTop = 0;
+static int mainItems[2], mainCount = 0;  // 0 = Contents, 1 = Text size
+
+static void drawMenuBox(const char* title, int rows, int h, int& x, int& y, int& w) {
+  w = 280;
+  x = (gfx::W - w) / 2;
+  y = 220;
+  gfx::waitIdle();
+  frame(x, y, w, h, 12);
+  gfx::text(x + 20, y + 8, title);
+  gfx::fillRect(x + 10, y + 42, w - 20, 2, true);
+}
+
+static void drawReaderMenu() {
+  constexpr int rowH = 40;
+  int x, y, w;
+  if (readerMenu == RMenu::Main) {
+    drawMenuBox("Menu", mainCount, 54 + mainCount * rowH, x, y, w);
+    for (int i = 0; i < mainCount; i++) {
+      const int ry = y + 48 + i * rowH;
+      const bool sel = i == readerMenuSel;
+      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
+      gfx::text(x + 24, ry + 4, mainItems[i] == 0 ? "Contents" : "Text size", !sel);
+    }
+  } else if (readerMenu == RMenu::Size) {
+    constexpr int n = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
+    drawMenuBox("Text size", n, 54 + n * rowH, x, y, w);
+    for (int i = 0; i < n; i++) {
+      const int ry = y + 48 + i * rowH;
+      const bool sel = i == readerMenuSel;
+      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
+      char row[24];
+      snprintf(row, sizeof(row), "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
+      gfx::text(x + 24, ry + 4, row, !sel);
+    }
+  } else if (readerMenu == RMenu::Toc) {
+    constexpr int visible = 14, rh = 48;
+    const int n = reader::tocCount();
+    if (readerMenuSel < tocTop) tocTop = readerMenuSel;
+    if (readerMenuSel >= tocTop + visible) tocTop = readerMenuSel - visible + 1;
+    gfx::waitIdle();
+    gfx::clear();
+    gfx::fillRect(0, 46, gfx::W, 2, true);
+    gfx::text(kMargin, 7, "Contents");
+    const int cur = reader::tocCurrent();
+    for (int r = 0; r < visible && tocTop + r < n; r++) {
+      const int i = tocTop + r, ry = 56 + r * rh;
+      const bool sel = i == readerMenuSel;
+      if (sel) roundRect(kMargin - 6, ry, gfx::W - 2 * kMargin + 12, rh - 4, 6, true);
+      const int indent = min(2, (int)reader::tocDepth(i)) * 18;
+      const int tw = gfx::W - 2 * kMargin - indent - 24;
+      gfx::text(kMargin + 6 + indent, ry + 8, gfx::ellipsize(reader::tocTitle(i), tw), !sel);
+      if (i == cur) gfx::text(gfx::W - kMargin - 12, ry + 8, "*", !sel);
+    }
+  }
+  gfx::flush(EInkDisplay::FAST_REFRESH);
+}
+
+static void closeReaderMenu(bool redraw) {
+  readerMenu = RMenu::None;
+  reader::uiFont(false);
+  if (redraw) reader::draw(false);
+}
+
+static void openReaderMenu() {
+  mainCount = 0;
+  if (reader::tocCount() > 0) mainItems[mainCount++] = 0;
+  mainItems[mainCount++] = 1;
+  readerMenu = RMenu::Main;
+  readerMenuSel = 0;
+  reader::uiFont(true);
+  drawReaderMenu();
+}
+
+static void readerMenuLoop() {
+  const bool down = pressed(InputManager::BTN_DOWN) || pressed(InputManager::BTN_RIGHT);
+  const bool up = !down && (pressed(InputManager::BTN_UP) || pressed(InputManager::BTN_LEFT));
+  int count = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])) : reader::tocCount();
+  if (down || up) {
+    readerMenuSel = (readerMenuSel + (down ? 1 : count - 1)) % max(1, count);
+    drawReaderMenu();
+  } else if (pressed(InputManager::BTN_CONFIRM)) {
+    if (readerMenu == RMenu::Main) {
+      if (mainItems[readerMenuSel] == 0) {
+        readerMenu = RMenu::Toc;
+        readerMenuSel = max(0, reader::tocCurrent());
+        tocTop = 0;
+      } else {
+        readerMenu = RMenu::Size;
+        readerMenuSel = 2;
+        for (int i = 0; i < (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])); i++)
+          if (reader::kFontSizes[i] == reader::fontSize()) readerMenuSel = i;
+      }
+      drawReaderMenu();
+    } else if (readerMenu == RMenu::Size) {
+      const int px = reader::kFontSizes[readerMenuSel];
+      readerMenu = RMenu::None;
+      reader::uiFont(false);
+      if (!reader::setFontSize(px)) reader::draw(false);
+    } else {
+      const int entry = readerMenuSel;
+      readerMenu = RMenu::None;
+      reader::uiFont(false);
+      if (!reader::openToc(entry)) reader::draw(false);
+    }
+  } else if (pressed(InputManager::BTN_BACK)) {
+    if (readerMenu == RMenu::Main) {
+      closeReaderMenu(true);
+    } else {
+      readerMenu = RMenu::Main;
+      readerMenuSel = 0;
+      drawReaderMenu();
+    }
+  }
+}
+
 static void readerLoop() {
-  if (pressed(InputManager::BTN_RIGHT) || pressed(InputManager::BTN_DOWN)) {
+  if (readerMenu != RMenu::None) {
+    readerMenuLoop();
+    return;
+  }
+  if (pressed(InputManager::BTN_CONFIRM)) {
+    openReaderMenu();
+  } else if (pressed(InputManager::BTN_RIGHT) || pressed(InputManager::BTN_DOWN)) {
     sessionTick();
     if (++fastRefreshes >= kCleanupTurns) { reader::next(true); fastRefreshes = 0; } else reader::next(false);
     if (++sess.turns % kCheckpointTurns == 0) checkpoint();
@@ -1658,6 +1949,11 @@ void setup() {
   loadStatsCache();
   loadPet();
   screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
+  if (screen == Screen::Library && openScope >= 1 && openScope <= 3) {  // back to the author / series / scope the book was opened from
+    src = (Scope)openScope;
+    srcId = openScopeId;
+    strlcpy(srcName, openScopeName, sizeof(srcName));
+  }
   openLibraryMagic = 0;
   String error;
   if (!config.load(error)) fatal("Setup needed", error + "\nSee config.example.json");
@@ -1848,7 +2144,7 @@ void loop() {
       if (readingSelected()) {
         openReadingNow();
       } else {
-        screen = Screen::Library;
+        screen = Screen::Browse;
         showList(false);
       }
     } else {
@@ -1983,6 +2279,79 @@ void loop() {
     delay(10);
     return;
   }
+  if (screen == Screen::Browse) {
+    if (backHeld()) {
+      toggleWifi();
+    } else if (backClicked()) {
+      screen = Screen::Home;
+      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN) && browseSel < 3) {
+      browseSel++;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && browseSel > 0) {
+      browseSel--;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      String error;
+      if (net == Net::Online) setBusy(true);
+      bool ok;
+      if (browseSel == 0) {
+        src = Scope::All;
+        srcId = 0;
+        srcName[0] = 0;
+        ok = loadPage(0, error);
+        if (ok) screen = Screen::Library;
+      } else {
+        ok = loadEntities((Scope)browseSel, 0, error);
+        if (ok) screen = Screen::Entities;
+      }
+      busy = false;
+      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Entities) {
+    String error;
+    if (backHeld()) {
+      toggleWifi();
+    } else if (backClicked()) {
+      screen = Screen::Browse;
+      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN) && entSel + 1 < entCount) {
+      entSel++;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && entSel > 0) {
+      entSel--;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM) && entCount > 0) {
+      src = entKind;
+      srcId = entities[entSel].id;
+      strlcpy(srcName, entities[entSel].name, sizeof(srcName));
+      if (net == Net::Online) setBusy(true);
+      const bool ok = loadPage(0, error);
+      busy = false;
+      if (ok) {
+        screen = Screen::Library;
+        showList(false);
+      } else {
+        src = Scope::All;
+        message("Error", error + "\n\nPress any button");
+      }
+    } else if (pressed(InputManager::BTN_RIGHT) && (entPage + 1) * kPageSize < entTotal) {
+      if (net == Net::Online) setBusy(true);
+      const bool ok = loadEntities(entKind, entPage + 1, error);
+      busy = false;
+      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+    } else if (pressed(InputManager::BTN_LEFT) && entPage > 0) {
+      if (net == Net::Online) setBusy(true);
+      const bool ok = loadEntities(entKind, entPage - 1, error);
+      busy = false;
+      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+    }
+    delay(10);
+    return;
+  }
   String error;
   if (backHeld()) {
     toggleWifi();
@@ -1993,7 +2362,12 @@ void loop() {
     selected--;
     showList(false);
   } else if (backClicked()) {
-    screen = Screen::Home;
+    if (src == Scope::All) {
+      screen = Screen::Browse;
+    } else {
+      entKind = src;  // after returning from a book the list is gone: reload its first page
+      if (entLoaded != src && !loadEntities(src, 0, error)) screen = Screen::Browse; else screen = Screen::Entities;
+    }
     showList(false);
   } else if (pressed(InputManager::BTN_CONFIRM)) {
     openSelected();

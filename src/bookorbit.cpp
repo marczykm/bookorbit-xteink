@@ -253,20 +253,28 @@ bool BookOrbit::login(const String& user, const String& password, String& error)
   return true;
 }
 
-int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error) {
+int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error, Scope scope, long scopeId) {
   NetGuard netGuard;
   Conn client;
   HTTPClient http;
-  if (!begin(http, client, server_ + "/api/v1/books/query", token_, error)) return -1;
-  http.addHeader("Content-Type", "application/json");
-  JsonDocument body;
-  body["sort"][0]["field"] = "addedAt";
-  body["sort"][0]["dir"] = "desc";
-  body["pagination"]["page"] = page;
-  body["pagination"]["size"] = pageSize;
-  String payload;
-  serializeJson(body, payload);
-  const int code = http.POST(payload);
+  int code;
+  if (scope == Scope::All) {
+    if (!begin(http, client, server_ + "/api/v1/books/query", token_, error)) return -1;
+    http.addHeader("Content-Type", "application/json");
+    JsonDocument body;
+    body["sort"][0]["field"] = "addedAt";
+    body["sort"][0]["dir"] = "desc";
+    body["pagination"]["page"] = page;
+    body["pagination"]["size"] = pageSize;
+    String payload;
+    serializeJson(body, payload);
+    code = http.POST(payload);
+  } else {
+    const char* kind = scope == Scope::Author ? "authors" : scope == Scope::Series ? "series" : "smart-scopes";
+    const String url = server_ + "/api/v1/" + kind + "/" + String(scopeId) + "/books?page=" + String(page) + "&size=" + String(pageSize);
+    if (!begin(http, client, url, token_, error)) return -1;
+    code = http.GET();
+  }
   if (!isOk(code)) {
     error = errorFor(code);
     http.end();
@@ -306,6 +314,54 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
         break;
       }
     }
+  }
+  return n;
+}
+
+int BookOrbit::listEntitiesOnce(Scope kind, int page, int pageSize, Entity* out, int max, int& total, String& error) {
+  NetGuard netGuard;
+  Conn client;
+  HTTPClient http;
+  const bool paged = kind != Scope::Smart;  // smart scopes come as one plain array
+  String url = server_ + "/api/v1/" + (kind == Scope::Author ? "authors" : kind == Scope::Series ? "series" : "smart-scopes");
+  if (paged) url += "?page=" + String(page) + "&size=" + String(pageSize);
+  if (!begin(http, client, url, token_, error)) return -1;
+  const int code = http.GET();
+  if (!isOk(code)) {
+    error = errorFor(code);
+    http.end();
+    return -1;
+  }
+  JsonDocument filter;
+  if (paged) {
+    filter["total"] = true;
+    filter["items"][0]["id"] = true;
+    filter["items"][0]["name"] = true;
+    filter["items"][0]["bookCount"] = true;
+  } else {
+    filter[0]["id"] = true;
+    filter[0]["name"] = true;
+    filter[0]["bookCount"] = true;
+  }
+  JsonDocument doc;
+  BodyStream resp(http);
+  const auto err = deserializeJson(doc, resp, DeserializationOption::Filter(filter));
+  http.end();
+  if (err) {
+    error = String("Bad response: ") + err.c_str();
+    return -1;
+  }
+  JsonArray items = paged ? doc["items"].as<JsonArray>() : doc.as<JsonArray>();
+  total = paged ? (doc["total"] | 0) : (int)items.size();
+  int skip = paged ? 0 : page * pageSize, n = 0;
+  for (JsonObject item : items) {
+    if (skip > 0) { skip--; continue; }
+    if (n >= max) break;
+    Entity& e = out[n++];
+    e = Entity();
+    e.id = item["id"] | 0L;
+    strlcpy(e.name, item["name"] | "(unnamed)", sizeof(e.name));
+    e.count = item["bookCount"] | 0;
   }
   return n;
 }
@@ -480,6 +536,9 @@ bool BookOrbit::getProgressOnce(long fileId, float& percentage, String& error) {
   const bool bad = static_cast<bool>(deserializeJson(doc, resp));
   http.end();
   percentage = doc["percentage"] | 0.0f;
+  String shown;
+  serializeJson(doc, shown);
+  Serial.printf("progress GET %ld: %s%s\n", fileId, bad ? "(unparsed) " : "", shown.c_str());
   return !bad;
 }
 
@@ -562,9 +621,15 @@ bool BookOrbit::refresh() {
 
 static bool unauthorized(const String& error) { return error.startsWith("Unauthorized"); }
 
-int BookOrbit::listBooks(int page, int pageSize, Book* out, int max, int& total, String& error) {
-  int n = listBooksOnce(page, pageSize, out, max, total, error);
-  if (n < 0 && unauthorized(error) && refresh()) n = listBooksOnce(page, pageSize, out, max, total, error);
+int BookOrbit::listBooks(int page, int pageSize, Book* out, int max, int& total, String& error, Scope scope, long scopeId) {
+  int n = listBooksOnce(page, pageSize, out, max, total, error, scope, scopeId);
+  if (n < 0 && unauthorized(error) && refresh()) n = listBooksOnce(page, pageSize, out, max, total, error, scope, scopeId);
+  return n;
+}
+
+int BookOrbit::listEntities(Scope kind, int page, int pageSize, Entity* out, int max, int& total, String& error) {
+  int n = listEntitiesOnce(kind, page, pageSize, out, max, total, error);
+  if (n < 0 && unauthorized(error) && refresh()) n = listEntitiesOnce(kind, page, pageSize, out, max, total, error);
   return n;
 }
 

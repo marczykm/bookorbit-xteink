@@ -9,6 +9,16 @@ struct Book {
   char author[64] = "";
 };
 
+// An author, series or smart scope in a browse list.
+struct Entity {
+  long id = 0;
+  char name[64] = "";
+  int count = 0;  // books in it
+};
+
+// What a book list is about: all books, or the books of one author / series / smart scope.
+enum class Scope { All = 0, Author = 1, Series = 2, Smart = 3 };
+
 class BookOrbit {
  public:
   // `insecure` skips certificate checks (for self-signed servers).
@@ -17,7 +27,9 @@ class BookOrbit {
   static void setActivityHook(void (*hook)(bool active));
   bool login(const String& user, const String& password, String& error);
   // Fills up to `max` books of one page; returns the count, or -1 on error. `total` is the library size.
-  int listBooks(int page, int pageSize, Book* out, int max, int& total, String& error);
+  int listBooks(int page, int pageSize, Book* out, int max, int& total, String& error, Scope scope = Scope::All, long scopeId = 0);
+  // Fills one page of authors, series or smart scopes (`kind` must be Author, Series or Smart); returns the count or -1.
+  int listEntities(Scope kind, int page, int pageSize, Entity* out, int max, int& total, String& error);
   // Reports reading progress (0-100) for a book file.
   bool postProgress(long fileId, float percentage, String& error);
   // Uploads one reading session (a JSON object). `rejected` is set when the server refuses it for good (a 4xx other than
@@ -37,7 +49,8 @@ class BookOrbit {
   bool download(const Book& book, String& path, String& error, void (*progress)(size_t done, size_t total));
 
  private:
-  int listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error);
+  int listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error, Scope scope, long scopeId);
+  int listEntitiesOnce(Scope kind, int page, int pageSize, Entity* out, int max, int& total, String& error);
   bool fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error);
   bool fetchThumbnailOnce(long bookId, const String& path, String& error);
   bool fetchWidgetsOnce(const char* const* types, int count, String& json, String& error);

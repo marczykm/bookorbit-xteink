@@ -4,6 +4,8 @@
 #include <EInkDisplay.h>
 #include <stdint.h>
 
+namespace freeink::font { class TtfFont; }
+
 namespace gfx {
 constexpr int W = 480;
 constexpr int H = 800;
@@ -11,6 +13,8 @@ constexpr int H = 800;
 void begin(EInkDisplay* display);
 // Switches text to Noto Serif from the flash font pack (Polish letters); keeps the ASCII bitmap font on failure.
 bool loadUiFont();
+// Lends the reader's text face to the UI text functions (so Polish titles work without loading a second font); nullptr gives it back.
+void lendFace(freeink::font::TtfFont* face);
 void clear(bool black = false);  // white page, or a black one
 // Draws a 1-bit image (MSB first, 1 = black pixel) with its top-left at (x, y).
 void blit1bit(int x, int y, const uint8_t* bits, int w, int h);

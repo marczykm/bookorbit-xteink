@@ -17,6 +17,8 @@ constexpr size_t kTtfArena = 14 * 1024;
 freeink::book::TtfFont ttf;
 freeink::font::Arena ttfArena;
 bool ttfOn = false;
+freeink::book::TtfFont* face = &ttf;  // the face text is drawn with: the UI font, or one lent by the reader
+bool ttfOnOwn = false;
 
 // Portrait is the panel rotated 90 degrees clockwise.
 inline void setPixel(int x, int y, bool black) {
@@ -54,7 +56,7 @@ const freeink::ui::FontGlyph* glyphFor(uint32_t cp) {
   return &font.glyphs[cp - font.first];
 }
 
-int advanceOf(uint32_t cp) { return ttfOn ? ttf.advance(cp, kTtfSize, 0) : glyphFor(cp)->xAdvance; }
+int advanceOf(uint32_t cp) { return ttfOn ? face->advance(cp, kTtfSize, 0) : glyphFor(cp)->xAdvance; }
 }  // namespace
 
 void begin(EInkDisplay* display) { disp = display; }
@@ -79,7 +81,13 @@ bool loadUiFont() {
   if (!ttf.init(pack + offset, length, ttfArena)) return false;
   ttf.setEmSizing(true);
   ttfOn = true;
+  ttfOnOwn = true;
   return true;
+}
+
+void lendFace(freeink::font::TtfFont* lent) {
+  face = lent ? lent : &ttf;
+  ttfOn = lent ? true : ttfOnOwn;
 }
 
 void clear(bool black) { memset(disp->getFrameBuffer(), black ? 0x00 : 0xFF, disp->getBufferSize()); }
@@ -95,7 +103,7 @@ void fillRect(int x, int y, int w, int h, bool black) {
     for (int i = 0; i < w; i++) setPixel(x + i, y + j, black);
 }
 
-int lineHeight() { return ttfOn ? ttf.lineHeight(kTtfSize) : font.yAdvance; }
+int lineHeight() { return ttfOn ? face->lineHeight(kTtfSize) : font.yAdvance; }
 
 int textWidth(const char* s) {
   int w = 0;
@@ -104,16 +112,16 @@ int textWidth(const char* s) {
 }
 
 void text(int x, int y, const char* s, bool black) {
-  const int baseline = y + (ttfOn ? ttf.ascent(kTtfSize) : font.ascent);
+  const int baseline = y + (ttfOn ? face->ascent(kTtfSize) : font.ascent);
   while (*s) {
     if (ttfOn) {
       const uint32_t cp = nextChar(s);
-      if (const auto* g = ttf.rasterize(cp, kTtfSize)) {
+      if (const auto* g = face->rasterize(cp, kTtfSize)) {
         for (int row = 0; row < g->height; row++)
           for (int col = 0; col < g->width; col++)
             if (g->pixels[row * g->width + col] > 110) setPixel(x + g->xoff + col, baseline + g->yoff + row, black);
       }
-      x += ttf.advance(cp, kTtfSize, 0);
+      x += face->advance(cp, kTtfSize, 0);
       continue;
     }
     const auto* g = glyphFor(nextChar(s));
@@ -131,21 +139,21 @@ void text(int x, int y, const char* s, bool black) {
 int bigTextWidth(const char* s, int sizePx) {
   if (!ttfOn) return textWidth(s) * max(1, sizePx / font.yAdvance);
   int w = 0;
-  for (const char* p = s; *p;) w += ttf.advance(nextChar(p), sizePx, 0);
+  for (const char* p = s; *p;) w += face->advance(nextChar(p), sizePx, 0);
   return w;
 }
 
 void bigText(int x, int y, const char* s, int sizePx, bool black) {
   if (ttfOn) {
-    const int baseline = y + ttf.ascent(sizePx);
+    const int baseline = y + face->ascent(sizePx);
     for (const char* p = s; *p;) {
       const uint32_t cp = nextChar(p);
-      if (const auto* g = ttf.rasterize(cp, sizePx)) {
+      if (const auto* g = face->rasterize(cp, sizePx)) {
         for (int row = 0; row < g->height; row++)
           for (int col = 0; col < g->width; col++)
             if (g->pixels[row * g->width + col] > 110) setPixel(x + g->xoff + col, baseline + g->yoff + row, black);
       }
-      x += ttf.advance(cp, sizePx, 0);
+      x += face->advance(cp, sizePx, 0);
     }
     return;
   }
