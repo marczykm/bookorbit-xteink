@@ -88,7 +88,11 @@ static void flushProgress() {
   if (left.isEmpty()) SdMan.remove(kOutbox); else SdMan.writeFile(kOutbox, left);
 }
 
-constexpr uint32_t kSleepAfterMs = 5 * 60 * 1000;  // no button for this long: show the sleep screen and deep-sleep
+// No button for this long: show the sleep screen and deep-sleep. Chosen in Settings, saved on the SD card.
+constexpr int kSleepOptions[] = {1, 2, 5, 10, 15, 30};  // minutes
+constexpr const char* kSleepFile = "/BookOrbit/.sleep";
+int sleepMinutes = 5;
+static uint32_t sleepAfterMs() { return (uint32_t)sleepMinutes * 60 * 1000; }
 uint32_t lastActivity = 0;
 
 // ---- Reading sessions (statistics) -----------------------------------------------------------------------------
@@ -226,8 +230,10 @@ Book books[kPageSize];
 int bookCount = 0, bookTotal = 0, page = 0, selected = 0;
 int fastRefreshes = 0;
 // Which screen is showing. Home is the entry point; Library is its only menu item for now.
-enum class Screen { Home, Library } screen = Screen::Home;
+enum class Screen { Home, Library, Settings, Picker } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
+int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
+int settingsSel = 0;  // Settings list: 0 = Wi-Fi, 1 = companion, 2 = sleep timer
 int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
@@ -358,7 +364,7 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 // Hints sit directly above the four buttons along the bottom edge: Back, OK, Left, Right.
 constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
 
-static void drawHints(bool back = true, bool ok = true, bool paging = true) {
+static void drawHints(bool back = true, bool ok = true, bool paging = true, bool settings = false) {
   const int top = gfx::H - 52, y = gfx::H - 42;
   gfx::fillRect(0, top, gfx::W, 2, true);
   const auto center = [](int i, int w) { return kButtonX[i] + (kButtonW - w) / 2; };
@@ -379,6 +385,20 @@ static void drawHints(bool back = true, bool ok = true, bool paging = true) {
   if (paging) {
     triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
     triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
+  }
+  if (settings) {  // a gear above the fourth button
+    const int gx = kButtonX[3] + kButtonW / 2, gy = y + 14;
+    for (int dy = -13; dy <= 13; dy++)
+      for (int dx = -13; dx <= 13; dx++) {
+        const float d = sqrtf((float)(dx * dx + dy * dy));
+        bool on = d <= 9.0f && d >= 4.5f;  // the ring with its hub hole
+        if (!on && d > 9.0f && d <= 13.0f) {  // eight teeth
+          float a = atan2f((float)dy, (float)dx) * 180.0f / (float)PI;  // -180..180
+          a = fmodf(a + 360.0f + 22.5f, 45.0f);
+          on = a > 11.0f && a < 34.0f;
+        }
+        if (on) gfx::fillRect(gx + dx, gy + dy, 1, 1, true);
+      }
   }
 }
 
@@ -576,11 +596,13 @@ static void loadPet() {
   if (SdMan.exists(kPetFile)) petIndex = constrain(atoi(SdMan.readFile(kPetFile).c_str()), 0, pets::kCount - 1);
 }
 
-static void nextPet() {
-  petIndex = (petIndex + 1) % pets::kCount;
+static void setPet(int index) {
+  petIndex = constrain(index, 0, pets::kCount - 1);
   SdMan.ensureDirectoryExists("/BookOrbit");
   SdMan.writeFile(kPetFile, String(petIndex));
 }
+
+static void nextPet() { setPet((petIndex + 1) % pets::kCount); }  // OK on the Home companion card
 
 // Same rules as the Android app and the KOReader plugin: one pose for the current situation.
 static pets::Pose petPose(int hour, bool finishedToday) {
@@ -745,6 +767,92 @@ static void drawHome(bool full) {
   drawStats();
   if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
   if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
+  drawHints(true, true, false, true);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
+// ---- Settings -------------------------------------------------------------------------------------------------
+
+static const char* wifiValue() {
+  if (net == Net::Online) return "On";
+  if (net == Net::Connecting) return "Connecting...";
+  return SdMan.exists(kWifiOffFlag) ? "Off" : "Not connected";
+}
+
+static void setSleep(int minutes) {
+  sleepMinutes = minutes;
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.writeFile(kSleepFile, String(sleepMinutes));
+}
+
+static void drawSettings(bool full) {
+  gfx::clear();
+  header("Settings");
+  const char* names[3] = {"Wi-Fi", "Companion", "Sleep after"};
+  String sleepText = String(sleepMinutes) + " min";
+  const String values[3] = {wifiValue(), pets::kNames[petIndex], sleepText};
+  for (int i = 0; i < 3; i++) {
+    const int y = kListTop + i * 72;
+    const bool sel = i == settingsSel;
+    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 64, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 64);
+    gfx::text(kMargin + 14, y + 17, names[i], !sel);
+    gfx::text(gfx::W - kMargin - 14 - gfx::textWidth(values[i].c_str()), y + 17, values[i].c_str(), !sel);
+  }
+  // About: read-only facts.
+  char line[96];
+  int y = kListTop + 3 * 72 + 14;
+  gfx::text(kMargin, y, "Server");
+  gfx::text(kMargin, y + 28, gfx::ellipsize(config.server.c_str(), gfx::W - 2 * kMargin));
+  snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
+  gfx::text(kMargin, y + 70, line);
+  drawHints(true, true, false);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
+// A list to choose one value from (companion or sleep timer), opened from Settings.
+constexpr int kPickerRows = 9, kPickerRowH = 70;
+
+static int pickerCount() { return pickerKind == 0 ? pets::kCount : (int)(sizeof(kSleepOptions) / sizeof(kSleepOptions[0])); }
+static String pickerLabel(int i) { return pickerKind == 0 ? String(pets::kNames[i]) : String(kSleepOptions[i]) + (kSleepOptions[i] == 1 ? " minute" : " minutes"); }
+static int pickerCurrent() {
+  if (pickerKind == 0) return petIndex;
+  for (int i = 0; i < pickerCount(); i++) if (kSleepOptions[i] == sleepMinutes) return i;
+  return 0;
+}
+
+static void openPicker(int kind) {
+  pickerKind = kind;
+  pickerSel = pickerCurrent();
+  pickerTop = max(0, min(pickerSel - kPickerRows / 2, pickerCount() - kPickerRows));
+  screen = Screen::Picker;
+  halfNext = true;
+}
+
+static void drawPicker(bool full) {
+  gfx::clear();
+  header(pickerKind == 0 ? "Companion" : "Sleep after");
+  const int n = pickerCount(), cur = pickerCurrent();
+  for (int r = 0; r < kPickerRows && pickerTop + r < n; r++) {
+    const int i = pickerTop + r, y = kListTop + r * kPickerRowH;
+    const bool sel = i == pickerSel;
+    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, 8, true);
+    else frame(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6);
+    gfx::text(kMargin + 14, y + 16, pickerLabel(i).c_str(), !sel);
+    if (i == cur) {  // a tick marks the value in use
+      const int tx = gfx::W - kMargin - 40, ty = y + 22;
+      for (int k = 0; k < 6; k++) gfx::fillRect(tx + k, ty + 6 + k, 3, 3, !sel);
+      for (int k = 0; k < 13; k++) gfx::fillRect(tx + 5 + k, ty + 11 - k * 15 / 13, 3, 3, !sel);
+    }
+  }
+  if (n > kPickerRows) {  // position among the entries
+    char pos[16];
+    snprintf(pos, sizeof(pos), "%d/%d", pickerSel + 1, n);
+    gfx::text(gfx::W - kMargin - gfx::textWidth(pos), gfx::H - 96, pos);
+  }
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -754,6 +862,8 @@ static void drawHome(bool full) {
 static void showList(bool full) {  // redraws whichever screen is current
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
+  else if (screen == Screen::Settings) drawSettings(full);
+  else if (screen == Screen::Picker) drawPicker(full);
   else drawList(full);
 }
 
@@ -981,6 +1091,10 @@ void setup() {
 #endif
   // The SD card must be mounted before the display driver claims the shared SPI bus.
   const bool sdOk = SdMan.begin();
+  if (sdOk && SdMan.exists(kSleepFile)) {
+    const int m = atoi(SdMan.readFile(kSleepFile).c_str());
+    for (int opt : kSleepOptions) if (opt == m) sleepMinutes = m;
+  }
   display.begin();
   gfx::begin(&display);
 
@@ -1154,7 +1268,7 @@ void loop() {
   input.update();
   handleSerial();
   if (input.wasAnyPressed() || injected >= 0) lastActivity = millis();
-  if (millis() - lastActivity > kSleepAfterMs) goToSleep();
+  if (millis() - lastActivity > sleepAfterMs()) goToSleep();
   // A click on Power sleeps, but only once the button has been seen released since boot, so the press
   // that woke the device doesn't put it straight back to sleep.
   static bool powerArmed = false;
@@ -1170,6 +1284,11 @@ void loop() {
   if (screen == Screen::Home) {
     if (backHeld()) {
       toggleWifi();
+    } else if (pressed(InputManager::BTN_RIGHT)) {
+      screen = Screen::Settings;
+      settingsSel = 0;
+      halfNext = true;
+      showList(true);
     } else if (pressed(InputManager::BTN_DOWN) && homeSel < 2) {
       homeSel = (homeSel == 0 && !stats.readingNow) ? 2 : homeSel + 1;
       showList(false);
@@ -1189,6 +1308,54 @@ void loop() {
       }
     } else {
       fetchNextCover();  // the Reading now cover
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Picker) {
+    if (backHeld()) {
+      toggleWifi();
+    } else if (backClicked()) {  // leave without changing anything
+      screen = Screen::Settings;
+      halfNext = true;
+      showList(true);
+    } else if (pressed(InputManager::BTN_DOWN) && pickerSel < pickerCount() - 1) {
+      pickerSel++;
+      if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && pickerSel > 0) {
+      pickerSel--;
+      if (pickerSel < pickerTop) pickerTop = pickerSel;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      if (pickerKind == 0) setPet(pickerSel); else setSleep(kSleepOptions[pickerSel]);
+      screen = Screen::Settings;
+      halfNext = true;
+      showList(true);
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Settings) {
+    if (backHeld()) {
+      toggleWifi();
+    } else if (backClicked()) {
+      screen = Screen::Home;
+      halfNext = true;
+      showList(true);
+    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 2) {
+      settingsSel++;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
+      settingsSel--;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      if (settingsSel == 0) {
+        toggleWifi();  // redraws by itself
+      } else {
+        openPicker(settingsSel == 1 ? 0 : 1);
+        showList(true);
+      }
     }
     delay(10);
     return;
