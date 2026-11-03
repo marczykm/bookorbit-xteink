@@ -263,6 +263,7 @@ enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline =
 constexpr uint32_t kNetKeepMs = 2 * 60 * 1000;  // how long Wi-Fi stays on after the last request
 uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off kNetKeepMs later
 int netDepth = 0;         // requests in flight
+bool syncFailed = false;  // the last attempt to reach the server failed
 bool netSaving = false;   // the radio is in modem-sleep (low power) while connected but quiet
 uint32_t netStart = 0;
 String offlineReason;
@@ -359,20 +360,16 @@ static void setBusy(bool on) {
 
 void testBusyDot() { setBusy(true); busy = false; }  // test hook: show the dot without a request
 
+static void drawSyncIcon(int cx, int cy, float f, bool slash);
+static bool unsynced();
+
 static void header(const char* title) {
   gfx::fillRect(0, 46, gfx::W, 2, true);  // light header: dark text on the page, a rule below
   gfx::text(kMargin, 7, title, true);
   const int batX = gfx::W - kMargin - 37;
   gfx::batteryIcon(batX, 15, battery.readPercentage(), true);
-  // Wi-Fi: strength arcs when online, just the dot while connecting, crossed out when offline.
-  if (net != Net::Offline) {  // the radio is only on while something needs it
-    int arcs = 0;
-    if (net == Net::Online && WiFi.status() == WL_CONNECTED) {
-      const int rssi = WiFi.RSSI();
-      arcs = rssi > -70 ? 3 : rssi > -82 ? 2 : 1;
-    }
-    gfx::wifiIcon(batX - 14 - 26, 13, arcs, false, true, false);
-  }
+  // The Wi-Fi icon is hidden for now (the radio is managed by the device); only the "not synced" icon sits next to the battery.
+  if (unsynced()) drawSyncIcon(batX - 14 - 13, 24, 0.8f, true);  // something is waiting to be sent, or the last sync failed
   if (busy) drawBusyDot();
 }
 
@@ -412,12 +409,14 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
 
 // Two circular arrows (sync), about 28 px across and centered on (cx, cy).
-static void drawSyncIcon(int cx, int cy) {
-  constexpr float kR = 9.5f, kPi = 3.14159265f;
-  for (int dy = -14; dy <= 14; dy++)
-    for (int dx = -14; dx <= 14; dx++) {
+static void drawSyncIcon(int cx, int cy, float f, bool slash) {
+  constexpr float kPi = 3.14159265f;
+  const float kR = 9.5f * f, thick = max(1.2f, 1.8f * f);
+  const int reach = (int)(14 * f) + 2;
+  for (int dy = -reach; dy <= reach; dy++)
+    for (int dx = -reach; dx <= reach; dx++) {
       const float d = sqrtf((float)(dx * dx + dy * dy));
-      if (d < kR - 1.8f || d > kR + 1.8f) continue;
+      if (d < kR - thick || d > kR + thick) continue;
       float a = atan2f((float)dy, (float)dx) * 180.0f / kPi;  // -180..180, clockwise on screen
       if (a < 0) a += 360.0f;
       if ((a > 25 && a < 150) || (a > 205 && a < 330)) gfx::fillRect(cx + dx, cy + dy, 1, 1, true);
@@ -426,15 +425,21 @@ static void drawSyncIcon(int cx, int cy) {
     const float a = (k ? 330.0f : 150.0f) * kPi / 180.0f;
     const float px = cx + kR * cosf(a), py = cy + kR * sinf(a);
     const float tx = -sinf(a), ty = cosf(a), nx = cosf(a), ny = sinf(a);  // tangent (direction of travel) and radial
-    const float tipX = px + 6 * tx, tipY = py + 6 * ty;
-    const float b1x = px - 5 * nx, b1y = py - 5 * ny, b2x = px + 5 * nx, b2y = py + 5 * ny;
-    for (int y = cy - 16; y <= cy + 16; y++)
-      for (int x = cx - 16; x <= cx + 16; x++) {  // inside the triangle (tip, b1, b2)?
+    const float tipX = px + 6 * f * tx, tipY = py + 6 * f * ty;
+    const float b1x = px - 5 * f * nx, b1y = py - 5 * f * ny, b2x = px + 5 * f * nx, b2y = py + 5 * f * ny;
+    const int r2 = (int)(16 * f) + 2;
+    for (int y = cy - r2; y <= cy + r2; y++)
+      for (int x = cx - r2; x <= cx + r2; x++) {  // inside the triangle (tip, b1, b2)?
         const float d1 = (x - b2x) * (tipY - b2y) - (tipX - b2x) * (y - b2y);
         const float d2 = (x - b1x) * (b2y - b1y) - (b2x - b1x) * (y - b1y);
         const float d3 = (x - tipX) * (b1y - tipY) - (b1x - tipX) * (y - tipY);
         if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) gfx::fillRect(x, y, 1, 1, true);
       }
+  }
+  if (slash) {  // crossed out: a diagonal with a white edge so it reads over the arrows
+    const int n = (int)(12 * f);
+    for (int i = -n; i <= n; i++) gfx::fillRect(cx + i - 2, cy + i - 3, 6, 7, false);  // the white edge first...
+    for (int i = -n; i <= n; i++) gfx::fillRect(cx + i, cy + i - 1, 2, 3, true);       // ...then the line on top
   }
 }
 
@@ -460,7 +465,7 @@ static void drawHints(bool back = true, bool ok = true, bool paging = true, bool
     triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
     triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
   }
-  if (sync) drawSyncIcon(kButtonX[2] + kButtonW / 2, y + 14);
+  if (sync) drawSyncIcon(kButtonX[2] + kButtonW / 2, y + 14, 1.0f, false);
   if (settings) {  // a gear above the fourth button
     const int gx = kButtonX[3] + kButtonW / 2, gy = y + 14;
     for (int dy = -13; dy <= 13; dy++)
@@ -1189,6 +1194,7 @@ constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330, kKbX = 20;
 // Bottom row: mode switch, space, cancel, done.
 constexpr int kBottomX[4] = {20, 130, 268, 368}, kBottomW[4] = {100, 128, 90, 92};
 
+bool t9Sym = false;  // the T9 keyboard is showing the symbol grid (the # key)
 static void t9Reset();
 static void drawT9(bool full);
 
@@ -1204,7 +1210,7 @@ static void openKeyboard(int target, const String& startText) {
 }
 
 static void drawKeyboard(bool full) {
-  if (kbStyle == 1) {
+  if (kbStyle == 1 && !t9Sym) {
     drawT9(full);
     return;
   }
@@ -1230,7 +1236,7 @@ static void drawKeyboard(bool full) {
       gfx::text(x + (kKeyW - gfx::textWidth(key)) / 2, y + 11, key, !sel);
     }
   }
-  const char* modeNext = kbMode == 0 ? "ABC" : kbMode == 1 ? "123" : "abc";
+  const char* modeNext = t9Sym ? "abc" : kbMode == 0 ? "ABC" : kbMode == 1 ? "123" : "abc";
   const char* labels[4] = {modeNext, "Space", "Cancel", "Done"};
   for (int k = 0; k < 4; k++) {
     const int y = kKbTop + 4 * kKeyPitch;
@@ -1293,7 +1299,14 @@ static bool keyboardPress() {
     return false;
   }
   switch (kbCol) {
-    case 0: kbMode = (kbMode + 1) % 3; return false;
+    case 0:
+      if (t9Sym) {  // back to the phone keypad
+        t9Sym = false;
+        kbMode = 0;
+      } else {
+        kbMode = (kbMode + 1) % 3;
+      }
+      return false;
     case 1: kbText += ' '; return false;
     case 2: return keyboardFinish(false);
     default: return keyboardFinish(true);
@@ -1302,8 +1315,8 @@ static bool keyboardPress() {
 
 // ---- Classic T9: a phone keypad where pressing a key repeatedly cycles through its letters (multi-tap) ----------------
 
-constexpr const char* kT9Chars[12] = {".,'-_@/:1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "", " 0", "!?#$%&*()+=;\"~|<>[]{}^`"};
-constexpr const char* kT9Labels[12] = {"1  .,@", "2  abc", "3  def", "4  ghi", "5  jkl", "6  mno", "7  pqrs", "8  tuv", "9  wxyz", "*", "0  space", "#  !?&"};
+constexpr const char* kT9Chars[12] = {".,'-_@/:1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "", " 0", ""};  // # opens the symbol grid
+constexpr const char* kT9Labels[12] = {"1  .,@", "2  abc", "3  def", "4  ghi", "5  jkl", "6  mno", "7  pqrs", "8  tuv", "9  wxyz", "*", "0  space", "#  symbols"};
 constexpr uint32_t kT9RepeatMs = 1100;  // the same key again within this time picks the next letter
 int t9Row = 1, t9Col = 1, t9Mode = 0;   // 0 abc, 1 Abc (next letter capital), 2 ABC
 int t9LastKey = -1, t9Index = 0;
@@ -1311,6 +1324,7 @@ bool t9Capital = false;
 uint32_t t9LastTap = 0;
 
 static void t9Reset() {
+  t9Sym = false;
   t9Row = 1;
   t9Col = 1;
   t9Mode = 0;
@@ -1327,6 +1341,13 @@ static void t9Move(int dr, int dc) {
 static bool t9Press() {
   if (t9Row == 4) return keyboardFinish(t9Col == 1);  // Cancel | Done
   const int id = t9Row * 3 + t9Col;                   // 0..11 for the keys 1-9, *, 0, #
+  if (id == 11) {                                     // # shows all the symbols, like the key grid's symbol page
+    t9Sym = true;
+    kbMode = 2;
+    kbRow = 0;
+    kbCol = 0;
+    return false;
+  }
   if (id == 9) {                                      // * switches the letter case
     t9Mode = (t9Mode + 1) % 3;
     t9LastKey = -1;
@@ -1562,6 +1583,8 @@ static bool ensureWifi(String& error) {
 static void syncModal(const char* title, const String& body);
 static void backgroundSync();
 
+static bool unsynced() { return syncFailed || SdMan.exists(kOutbox) || SdMan.exists(kSessionOutbox); }
+
 static void goOffline() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -1590,16 +1613,19 @@ static bool goOnline(String& error, bool announce = true) {
     return false;
   }
   if (!connectWifi(error)) {
+    syncFailed = true;
     goOffline();
     return false;
   }
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // wall-clock time for reading sessions
   if (!api.login(config.username, config.password, error)) {
+    syncFailed = true;
     goOffline();
     return false;
   }
   flushProgress();
   flushSessions();
+  syncFailed = false;
   net = Net::Online;
   lastNetUse = millis();
   return true;
@@ -2157,6 +2183,7 @@ static void backgroundSync() {
   String error;
   if (WiFi.status() != WL_CONNECTED) {
     if (millis() - netStart > 20000) {
+      syncFailed = true;
       goOffline();
       offlineReason = "Could not join Wi-Fi \"" + config.ssid + "\"";
       Serial.printf("offline: %s\n", offlineReason.c_str());
@@ -2171,11 +2198,13 @@ static void backgroundSync() {
   if (api.login(config.username, config.password, error)) {
     flushProgress();
     flushSessions();
+    syncFailed = false;
     net = Net::Online;
     refreshStats();
     if (loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
+    syncFailed = true;
     goOffline();
     offlineReason = error;
     Serial.printf("offline: %s\n", error.c_str());
@@ -2301,7 +2330,7 @@ void loop() {
     return;
   }
   if (screen == Screen::Keyboard) {
-    const bool t9 = kbStyle == 1;
+    const bool t9 = kbStyle == 1 && !t9Sym;
     if (backClicked()) {  // Back deletes the last character
       if (kbText.length()) kbText.remove(kbText.length() - 1);
       t9LastKey = -1;
