@@ -814,25 +814,40 @@ static void setSleep(int minutes) {
 static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
+  // Rows are grouped under section headings; settingsSel counts rows only.
+  const char* sectionOf[8] = {"Wi-Fi", nullptr, "Account", nullptr, nullptr, "Device", nullptr, nullptr};  // heading above the row
   const char* names[8] = {"Wi-Fi", "Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
   String stars;
   for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
   const String values[8] = {wifiValue(), config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText};
+  constexpr int kRowH = 52, kRowPitch = 58, kHeadingH = 34;
+  int y = 60;
   for (int i = 0; i < 8; i++) {
-    const int y = kListTop + i * 72;
+    if (sectionOf[i]) {  // a heading: the name in capitals, then a rule to the edge
+      String h = sectionOf[i];
+      h.toUpperCase();
+      gfx::text(kMargin, y + 2, h.c_str());
+      gfx::text(kMargin + 1, y + 2, h.c_str());  // a second pass makes it bolder
+      const int w = gfx::textWidth(h.c_str()) + 10;
+      gfx::fillRect(kMargin + w, y + 16, gfx::W - 2 * kMargin - w, 2, true);
+      y += kHeadingH;
+    }
     const bool sel = i == settingsSel;
-    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 64, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 64);
-    gfx::text(kMargin + 14, y + 17, names[i], !sel);
+    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kRowH, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, kRowH);
+    gfx::text(kMargin + 14, y + 11, names[i], !sel);
     const int valueX = gfx::W - kMargin - 14;
     const char* v = gfx::ellipsize(values[i].c_str(), valueX - (kMargin + 14 + gfx::textWidth(names[i])) - 16);
-    gfx::text(valueX - gfx::textWidth(v), y + 17, v, !sel);
+    gfx::text(valueX - gfx::textWidth(v), y + 11, v, !sel);
+    y += kRowPitch;
   }
   // About: read-only facts.
+  gfx::text(kMargin, y + 2, "ABOUT");
+  gfx::text(kMargin + 1, y + 2, "ABOUT");
+  gfx::fillRect(kMargin + gfx::textWidth("ABOUT") + 10, y + 16, gfx::W - 2 * kMargin - gfx::textWidth("ABOUT") - 10, 2, true);
   char line[96];
-  int y = kListTop + 8 * 72 + 14;
   snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
-  gfx::text(kMargin, y, line);
+  gfx::text(kMargin, y + kHeadingH, line);
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
