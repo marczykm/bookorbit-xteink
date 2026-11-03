@@ -1245,11 +1245,14 @@ static void drawKeyboard(bool full) {
 static void keyboardMove(int dr, int dc) {
   if (dr) {
     const int old = kbRow;
-    kbRow = constrain(kbRow + dr, 0, 4);
+    kbRow = (kbRow + dr + 5) % 5;  // wraps: below the bottom row is the top one
     if (kbRow == 4 && old != 4) kbCol = constrain(kbCol * 4 / 10, 0, 3);  // keep roughly the same x
     if (old == 4 && kbRow != 4) kbCol = constrain((kBottomX[kbCol] + kBottomW[kbCol] / 2 - kKbX) / kKeyW, 0, 9);
   }
-  if (dc) kbCol = constrain(kbCol + dc, 0, kbRow == 4 ? 3 : 9);
+  if (dc) {  // wraps along the row
+    const int n = kbRow == 4 ? 4 : 10;
+    kbCol = (kbCol + dc + n) % n;
+  }
 }
 
 // Cancel (done = false) or accept (done = true) what was typed. Returns true when the keyboard was closed.
@@ -1316,8 +1319,9 @@ static void t9Reset() {
 
 static void t9Move(int dr, int dc) {
   t9LastKey = -1;  // moving away ends the current letter
-  t9Row = constrain(t9Row + dr, 0, 4);
-  t9Col = constrain(t9Col + dc, 0, t9Row == 4 ? 1 : 2);
+  t9Row = (t9Row + dr + 5) % 5;  // wraps in both directions
+  const int n = t9Row == 4 ? 2 : 3;
+  t9Col = dc ? (t9Col + dc + n) % n : min(t9Col, n - 1);
 }
 
 static bool t9Press() {
@@ -2254,12 +2258,12 @@ void loop() {
       screen = Screen::Settings;
       settingsSel = 0;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && homeSel < (stats.readingNow ? 1 : 0)) {
-      homeSel++;
-      showList(false);
-    } else if (pressed(InputManager::BTN_UP) && homeSel > 0) {
-      homeSel--;
-      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN)) {  // the lists wrap around: past the last item is the first
+      const int n = stats.readingNow ? 2 : 1;
+      if (n > 1) { homeSel = (homeSel + 1) % n; showList(false); }
+    } else if (pressed(InputManager::BTN_UP)) {
+      const int n = stats.readingNow ? 2 : 1;
+      if (n > 1) { homeSel = (homeSel + n - 1) % n; showList(false); }
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (readingSelected()) {
         openReadingNow();
@@ -2326,13 +2330,15 @@ void loop() {
       screen = Screen::Settings;
       if (net != Net::Offline) startWifi();
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && netSel < scanCount) {
-      netSel++;
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      netSel = (netSel + 1) % (scanCount + 1);  // the last entry is "Other network..."
+      if (netSel < netTop) netTop = netSel;
       if (netSel >= netTop + kPickerRows) netTop = netSel - kPickerRows + 1;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && netSel > 0) {
-      netSel--;
+    } else if (pressed(InputManager::BTN_UP)) {
+      netSel = (netSel + scanCount) % (scanCount + 1);
       if (netSel < netTop) netTop = netSel;
+      if (netSel >= netTop + kPickerRows) netTop = netSel - kPickerRows + 1;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       networkChosen();
@@ -2344,13 +2350,15 @@ void loop() {
     if (backClicked()) {  // leave without changing anything
       screen = Screen::Settings;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && pickerSel < pickerCount() - 1) {
-      pickerSel++;
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      pickerSel = (pickerSel + 1) % pickerCount();
+      if (pickerSel < pickerTop) pickerTop = pickerSel;
       if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && pickerSel > 0) {
-      pickerSel--;
+    } else if (pressed(InputManager::BTN_UP)) {
+      pickerSel = (pickerSel + pickerCount() - 1) % pickerCount();
       if (pickerSel < pickerTop) pickerTop = pickerSel;
+      if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (pickerKind == 0) {
@@ -2372,11 +2380,11 @@ void loop() {
     if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 6) {
-      settingsSel++;
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      settingsSel = (settingsSel + 1) % 7;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
-      settingsSel--;
+    } else if (pressed(InputManager::BTN_UP)) {
+      settingsSel = (settingsSel + 6) % 7;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (settingsSel == 0) {
@@ -2399,11 +2407,11 @@ void loop() {
     if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && browseSel < 3) {
-      browseSel++;
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      browseSel = (browseSel + 1) % 4;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && browseSel > 0) {
-      browseSel--;
+    } else if (pressed(InputManager::BTN_UP)) {
+      browseSel = (browseSel + 3) % 4;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       String error;
@@ -2430,12 +2438,10 @@ void loop() {
     if (backClicked()) {
       screen = Screen::Browse;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && entSel + 1 < entCount) {
-      entSel++;
-      showList(false);
-    } else if (pressed(InputManager::BTN_UP) && entSel > 0) {
-      entSel--;
-      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      if (entCount > 1) { entSel = (entSel + 1) % entCount; showList(false); }
+    } else if (pressed(InputManager::BTN_UP)) {
+      if (entCount > 1) { entSel = (entSel + entCount - 1) % entCount; showList(false); }
     } else if (pressed(InputManager::BTN_CONFIRM) && entCount > 0) {
       src = entKind;
       srcId = entities[entSel].id;
@@ -2465,12 +2471,10 @@ void loop() {
     return;
   }
   String error;
-  if (pressed(InputManager::BTN_DOWN) && selected + 1 < bookCount) {
-    selected++;
-    showList(false);
-  } else if (pressed(InputManager::BTN_UP) && selected > 0) {
-    selected--;
-    showList(false);
+  if (pressed(InputManager::BTN_DOWN)) {
+    if (bookCount > 1) { selected = (selected + 1) % bookCount; showList(false); }
+  } else if (pressed(InputManager::BTN_UP)) {
+    if (bookCount > 1) { selected = (selected + bookCount - 1) % bookCount; showList(false); }
   } else if (backClicked()) {
     if (src == Scope::All) {
       screen = Screen::Browse;
