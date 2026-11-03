@@ -29,6 +29,9 @@ void bigText(int x, int y, const char* utf8, int sizePx, bool black = true);
 int bigTextWidth(const char* utf8, int sizePx);
 // Fits `utf8` into maxWidth pixels, ending with "..." when it has to cut. Returns a static buffer.
 const char* ellipsize(const char* utf8, int maxWidth);
+// Starts a panel refresh and returns at once (the panel finishes on its own, ~0.5-2 s), so buttons keep being read meanwhile.
 void flush(EInkDisplay::RefreshMode mode);
+bool busy();      // a refresh is still running on the panel
+void waitIdle();  // block until it is done
 void dumpFramebuffer();  // hex over serial, for screenshots without a camera
 }  // namespace gfx

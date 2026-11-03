@@ -247,9 +247,29 @@ static void drawSleepScreen();
 
 // Test hook: single serial characters act as button presses (o=OK d=down u=up n=right p=left b=back).
 static int injected = -1;
+
+// Buttons are sampled by a small background task, so a tap is never missed while the main loop is busy (rendering a page,
+// talking to the server): presses are counted here and consumed by pressed(), in order.
+static volatile uint8_t pressCount[8];
+static volatile uint8_t anyCount;
+static volatile bool backReleased;
+
+static void inputTask(void*) {
+  for (;;) {
+    input.update();
+    for (uint8_t b = 0; b < 7; b++)
+      if (input.wasPressed(b) && pressCount[b] < 4) pressCount[b] = pressCount[b] + 1;
+    if (input.wasAnyPressed() && anyCount < 250) anyCount = anyCount + 1;
+    if (input.wasReleased(InputManager::BTN_BACK)) backReleased = true;
+    vTaskDelay(pdMS_TO_TICKS(8));
+  }
+}
+
 static bool pressed(uint8_t button) {
   if (injected == button) { injected = -1; return true; }
-  return input.wasPressed(button);
+  if (pressCount[button] == 0) return false;
+  pressCount[button] = pressCount[button] - 1;
+  return true;
 }
 
 // Serial commands: "F" dumps the framebuffer; "CFG:<json>" saves the settings file to the SD card and reboots.
@@ -859,12 +879,29 @@ static void drawPicker(bool full) {
   halfNext = false;
 }
 
-static void showList(bool full) {  // redraws whichever screen is current
+// Screen changes are only scheduled here; loop() draws them once the panel is idle (pumpDisplay). Buttons therefore never
+// wait for a refresh, and several quick presses collapse into one redraw of the latest state.
+static bool redrawPending = false, redrawFull = false;
+static void showList(bool full);
+
+static void drawScreen(bool full) {  // draws whichever screen is current
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
   else if (screen == Screen::Settings) drawSettings(full);
   else if (screen == Screen::Picker) drawPicker(full);
   else drawList(full);
+}
+
+static void showList(bool full) {
+  redrawPending = true;
+  redrawFull |= full;
+}
+
+static void pumpDisplay() {
+  if (!redrawPending || gfx::busy()) return;
+  const bool full = redrawFull;
+  redrawPending = redrawFull = false;
+  drawScreen(full);
 }
 
 // ---- Actions -------------------------------------------------------------------------------------------------
@@ -962,10 +999,10 @@ static void downloadProgress(size_t done, size_t total) {
 }
 
 static void waitForKey() {
+  anyCount = 0;
   do {
     delay(20);
-    input.update();
-  } while (!input.wasAnyPressed() && injected < 0);
+  } while (anyCount == 0 && injected < 0);
   injected = -1;
 }
 
@@ -1038,6 +1075,7 @@ static void drawSleepScreen() {
   }
   if (WiFi.getMode() != WIFI_OFF) WiFi.mode(WIFI_OFF);
   drawSleepScreen();
+  gfx::waitIdle();
   display.deepSleep();
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
@@ -1069,9 +1107,8 @@ static void readerLoop() {
   Serial.printf("%s: %s\n", title, detail.c_str());
   message(title, detail + "\n\nPress Power to retry");
   while (true) {
-    input.update();
     handleSerial();
-    if (input.wasPressed(InputManager::BTN_POWER)) ESP.restart();
+    if (pressed(InputManager::BTN_POWER)) ESP.restart();
     delay(50);
   }
 }
@@ -1086,6 +1123,7 @@ void setup() {
 
   BoardConfig::releaseSdRail();
   input.begin();
+  xTaskCreate(inputTask, "input", 3072, nullptr, 2, nullptr);
 #if FREEINK_DEVICE_X4CLASSIC
   freeink::applyXteinkDisplayController();
 #endif
@@ -1248,7 +1286,8 @@ void testToggleWifi() { toggleWifi(); }
 static bool holdFired = false;
 static bool backClicked() {
   if (injected == InputManager::BTN_BACK) { injected = -1; return true; }  // test hook
-  if (!input.wasReleased(InputManager::BTN_BACK)) return false;
+  if (!backReleased) return false;
+  backReleased = false;
   const bool wasHold = holdFired;
   holdFired = false;
   return !wasHold;
@@ -1265,21 +1304,25 @@ static bool backHeld() {
 }
 
 void loop() {
-  input.update();
   handleSerial();
-  if (input.wasAnyPressed() || injected >= 0) lastActivity = millis();
+  if (anyCount || injected >= 0) {
+    anyCount = 0;
+    lastActivity = millis();
+  }
   if (millis() - lastActivity > sleepAfterMs()) goToSleep();
   // A click on Power sleeps, but only once the button has been seen released since boot, so the press
   // that woke the device doesn't put it straight back to sleep.
   static bool powerArmed = false;
   if (!input.isPowerButtonPhysicallyPressed()) powerArmed = true;
-  if (powerArmed && input.wasPressed(InputManager::BTN_POWER)) goToSleep();
+  const bool powerClicked = pressed(InputManager::BTN_POWER);  // consumed even while unarmed, so the waking press is dropped
+  if (powerArmed && powerClicked) goToSleep();
 
   if (reader::isOpen()) {
     readerLoop();
     delay(10);
     return;
   }
+  pumpDisplay();
   backgroundSync();
   if (screen == Screen::Home) {
     if (backHeld()) {

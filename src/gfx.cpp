@@ -214,7 +214,9 @@ const char* ellipsize(const char* s, int maxWidth) {
   return out;
 }
 
-void flush(EInkDisplay::RefreshMode mode) { disp->displayBuffer(mode); }
+void flush(EInkDisplay::RefreshMode mode) { disp->displayBufferAsync(mode); }  // falls back to blocking if RAM is short
+bool busy() { return disp->refreshBusy(); }
+void waitIdle() { disp->waitRefreshComplete(); }
 
 void dumpFramebuffer() {
   Serial.println("FB-BEGIN");
