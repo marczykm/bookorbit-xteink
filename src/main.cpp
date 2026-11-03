@@ -251,7 +251,8 @@ bool firstDraw = true;  // the first draw after power-on / wake / returning from
 
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
 enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline = the radio is off, which is the normal idle state
-uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off a few seconds later
+constexpr uint32_t kNetKeepMs = 2 * 60 * 1000;  // how long Wi-Fi stays on after the last request
+uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off kNetKeepMs later
 int netDepth = 0;         // requests in flight
 uint32_t netStart = 0;
 String offlineReason;
@@ -1518,9 +1519,9 @@ static bool goOnline(String& error, bool announce = true) {
   return true;
 }
 
-// Switches the radio off once nothing has used the server for a few seconds.
+// Switches the radio off once nothing has used the server for two minutes (so browsing and downloading in a row stay connected).
 static void netIdle() {
-  if (net != Net::Online || netDepth > 0 || millis() - lastNetUse < 6000) return;
+  if (net != Net::Online || netDepth > 0 || millis() - lastNetUse < kNetKeepMs) return;
   goOffline();
   showList(false);
 }
