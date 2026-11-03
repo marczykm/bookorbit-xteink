@@ -28,6 +28,7 @@ constexpr int EPD_SCLK = 8, EPD_MOSI = 10, EPD_CS = 21, EPD_DC = 4, EPD_RST = 5,
 EInkDisplay display(EPD_SCLK, EPD_MOSI, EPD_CS, EPD_DC, EPD_RST, EPD_BUSY);
 InputManager input;
 BatteryMonitor battery;
+int readerBatteryPercent() { return battery.readPercentage(); }  // for the reader's header
 Config config;
 BookOrbit api;
 

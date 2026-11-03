@@ -18,6 +18,8 @@ using namespace freeink::book;
 
 extern EInkDisplay display;
 
+int readerBatteryPercent();  // defined in main.cpp
+
 namespace reader {
 namespace {
 
@@ -340,7 +342,7 @@ bool open(const char* epubPath, String& error, float serverPercent) {
     const int px = atoi(SdMan.readFile(kMarginFile).c_str());
     for (int opt : kMargins) if (opt == px) s.params.marginLeft = s.params.marginRight = px;
   }
-  s.params.marginTop = 24;
+  s.params.marginTop = 46;  // room for the page header
   s.params.marginBottom = 56;  // room for the page footer
   s.params.baseSizePx = s.ttf ? 22 : 24;
   if (s.ttf && SdMan.exists(kFontSizeFile)) {
@@ -408,6 +410,21 @@ void close() {
   freeBuffers();
 }
 
+// Page header: the chapter's name on the left, the battery on the right.
+static void drawHeader() {
+  State& s = *st;
+  constexpr int kBatW = 37;
+  gfx::lendFace(s.ttf ? &s.faces[0] : nullptr);  // the book's face has the Polish letters
+  const int cur = tocCurrent();
+  if (cur >= 0) {
+    const int maxW = gfx::W - 2 * 20 - kBatW - 16;
+    gfx::bigText(20, 8, gfx::ellipsize(s.book.tocEntry(cur)->title, maxW), 18);
+  }
+  gfx::lendFace(nullptr);
+  gfx::batteryIcon(gfx::W - 20 - kBatW, 11, readerBatteryPercent(), true);
+  gfx::fillRect(20, 38, gfx::W - 40, 1, true);
+}
+
 void draw(bool full) {
   if (!isOpen()) return;
   State& s = *st;
@@ -425,6 +442,7 @@ void draw(bool full) {
     gfx::text(20, 100, "Cannot read page");
   }
   s.scratch.release(mark);
+  drawHeader();
   char footer[48];
   snprintf(footer, sizeof(footer), "%d/%u   page %u/%u", s.spine + 1, (unsigned)s.book.spineCount(), (unsigned)s.page + 1,
            (unsigned)s.pages.pageCount());
