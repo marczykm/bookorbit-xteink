@@ -90,7 +90,14 @@ void lendFace(freeink::font::TtfFont* lent) {
   ttfOn = lent ? true : ttfOnOwn;
 }
 
-void clear(bool black) { memset(disp->getFrameBuffer(), black ? 0x00 : 0xFF, disp->getBufferSize()); }
+namespace {
+bool washed = false;  // the screen behind a modal is already faded
+}
+
+void clear(bool black) {
+  memset(disp->getFrameBuffer(), black ? 0x00 : 0xFF, disp->getBufferSize());
+  washed = false;
+}
 
 void blit1bit(int x, int y, const uint8_t* bits, int w, int h) {
   const int stride = (w + 7) / 8;
@@ -247,8 +254,20 @@ void roundRect(int x, int y, int w, int h, int r, bool black) {
 }
 }  // namespace
 
+void fadeBackground() {
+  if (washed) return;  // fade what is behind a box: whiten every other pixel in a checkerboard, so black becomes grey
+  uint8_t* fb = disp->getFrameBuffer();
+  const int stride = disp->getDisplayWidthBytes(), rows = disp->getDisplayHeight();
+  for (int r = 0; r < rows; r++) {
+    const uint8_t mask = (r & 1) ? 0xAA : 0x55;
+    for (int b = 0; b < stride; b++) fb[r * stride + b] |= mask;
+  }
+  washed = true;
+}
+
 void modal(const char* title, const char* body) {
   waitIdle();
+  fadeBackground();
   const int w = 300, h = 80, x = (W - w) / 2, y = 330, r = 10;
   roundRect(x, y, w, h, r, true);
   roundRect(x + 2, y + 2, w - 4, h - 4, r - 2, false);

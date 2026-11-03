@@ -1756,6 +1756,7 @@ static void drawMenuBox(const char* title, int rows, int h, int& x, int& y, int&
   x = (gfx::W - w) / 2;
   y = 250;
   gfx::waitIdle();
+  gfx::fadeBackground();
   frame(x, y, w, h, 12);
   gfx::bigText(x + 18, y + 8, title, 18);
   gfx::fillRect(x + 10, y + 34, w - 20, 2, true);

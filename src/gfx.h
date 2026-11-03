@@ -17,6 +17,7 @@ bool loadUiFont();
 void lendFace(freeink::font::TtfFont* face);
 // A small centered notice box (rounded frame, title and one line of text) drawn over the current screen and refreshed quickly.
 void modal(const char* title, const char* body);
+void fadeBackground();  // greys the screen behind a box (once, until the next clear())
 void clear(bool black = false);  // white page, or a black one
 // Draws a 1-bit image (MSB first, 1 = black pixel) with its top-left at (x, y).
 void blit1bit(int x, int y, const uint8_t* bits, int w, int h);
