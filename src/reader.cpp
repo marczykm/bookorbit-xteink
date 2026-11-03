@@ -343,7 +343,7 @@ bool open(const char* epubPath, String& error, float serverPercent) {
     for (int opt : kMargins) if (opt == px) s.params.marginLeft = s.params.marginRight = px;
   }
   s.params.marginTop = 46;  // room for the page header
-  s.params.marginBottom = 70;  // room for the page footer and progress axis
+  s.params.marginBottom = 52;  // room for the progress axis
   s.params.baseSizePx = s.ttf ? 22 : 24;
   if (s.ttf && SdMan.exists(kFontSizeFile)) {
     const int px = atoi(SdMan.readFile(kFontSizeFile).c_str());
@@ -506,16 +506,10 @@ bool openToc(int i) {
   return true;
 }
 
-// Page footer: "chapter/total  page n/m" and, below it, the progress axis: a line for the whole book, a tick at the start of each
+// Page footer: the progress axis: a line for the whole book, a tick at the start of each
 // chapter and a dot for the current position.
 static void drawFooter() {
   State& s = *st;
-  gfx::lendFace(s.ttf ? &s.faces[0] : nullptr);
-  char text[48];
-  snprintf(text, sizeof(text), "%d/%u   page %u/%u", s.spine + 1, (unsigned)s.book.spineCount(), (unsigned)s.page + 1,
-           (unsigned)s.pages.pageCount());
-  gfx::bigText(20, gfx::H - 62, text, 16);
-  gfx::lendFace(nullptr);
 
   constexpr int x0 = 20, len = gfx::W - 40, y = gfx::H - 26;
   gfx::fillRect(x0, y - 1, len, 2, true);
