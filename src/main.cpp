@@ -230,10 +230,10 @@ Book books[kPageSize];
 int bookCount = 0, bookTotal = 0, page = 0, selected = 0;
 int fastRefreshes = 0;
 // Which screen is showing. Home is the entry point; Library is its only menu item for now.
-enum class Screen { Home, Library, Settings, Picker } screen = Screen::Home;
+enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
-int settingsSel = 0;  // Settings list: 0 = Wi-Fi, 1 = companion, 2 = sleep timer
+int settingsSel = 0;  // Settings list: 0 = Wi-Fi on/off, 1 = Wi-Fi network, 2 = companion, 3 = sleep timer
 int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
@@ -812,19 +812,22 @@ static void setSleep(int minutes) {
 static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
-  const char* names[3] = {"Wi-Fi", "Companion", "Sleep after"};
+  const char* names[4] = {"Wi-Fi", "Network", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
-  const String values[3] = {wifiValue(), pets::kNames[petIndex], sleepText};
-  for (int i = 0; i < 3; i++) {
+  String ssidText = config.ssid;
+  const String values[4] = {wifiValue(), ssidText, pets::kNames[petIndex], sleepText};
+  for (int i = 0; i < 4; i++) {
     const int y = kListTop + i * 72;
     const bool sel = i == settingsSel;
     if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 64, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 64);
     gfx::text(kMargin + 14, y + 17, names[i], !sel);
-    gfx::text(gfx::W - kMargin - 14 - gfx::textWidth(values[i].c_str()), y + 17, values[i].c_str(), !sel);
+    const int valueX = gfx::W - kMargin - 14;
+    const char* v = gfx::ellipsize(values[i].c_str(), valueX - (kMargin + 14 + gfx::textWidth(names[i])) - 16);
+    gfx::text(valueX - gfx::textWidth(v), y + 17, v, !sel);
   }
   // About: read-only facts.
   char line[96];
-  int y = kListTop + 3 * 72 + 14;
+  int y = kListTop + 4 * 72 + 14;
   gfx::text(kMargin, y, "Server");
   gfx::text(kMargin, y + 28, gfx::ellipsize(config.server.c_str(), gfx::W - 2 * kMargin));
   snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
@@ -885,11 +888,212 @@ static void drawPicker(bool full) {
 static bool redrawPending = false, redrawFull = false;
 static void showList(bool full);
 
+// ---- Wi-Fi network: scan, pick, type the password ----------------------------------------------------------------
+
+struct ScanEntry {
+  char ssid[33];
+  int rssi;
+  bool open;
+};
+constexpr int kMaxScan = 12;
+ScanEntry scanList[kMaxScan];
+int scanCount = 0, netSel = 0, netTop = 0;
+String pendingSsid, kbText;
+bool kbForSsid = false;  // the keyboard is typing a network name ("Other network"), not a password
+int kbMode = 0;          // 0 lower case, 1 upper case (one letter), 2 symbols
+int kbRow = 1, kbCol = 0;
+
+// Joins the saved network again (used after the credentials change or a scan).
+static void startWifi() {
+  SdMan.remove(kWifiOffFlag);
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
+  net = Net::Connecting;
+  netStart = millis();
+}
+
+// Stores the credentials in /bookorbit.json (other settings there are kept) and starts connecting with them.
+static void saveWifiCreds(const String& ssid, const String& password) {
+  JsonDocument doc;
+  if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
+  doc["ssid"] = ssid;
+  doc["wifiPassword"] = password;
+  String json;
+  serializeJsonPretty(doc, json);
+  SdMan.writeFile("/bookorbit.json", json);
+  config.ssid = ssid;
+  config.wifiPassword = password;
+  startWifi();
+}
+
+static void scanForNetworks() {
+  message("Wi-Fi", "Scanning for networks...", false);
+  const bool wasOff = WiFi.getMode() == WIFI_OFF;
+  if (wasOff) WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks(false, false);
+  if (n < 0) {  // busy joining a network: stop that and scan again
+    WiFi.disconnect();
+    delay(300);
+    n = WiFi.scanNetworks(false, false);
+  }
+  scanCount = 0;
+  for (int i = 0; i < n; i++) {  // strongest first (the driver sorts by signal), one entry per name
+    const String name = WiFi.SSID(i);
+    if (name.isEmpty()) continue;
+    bool dup = false;
+    for (int k = 0; k < scanCount; k++) if (name == scanList[k].ssid) dup = true;
+    if (dup || scanCount >= kMaxScan) continue;
+    strlcpy(scanList[scanCount].ssid, name.c_str(), sizeof(scanList[0].ssid));
+    scanList[scanCount].rssi = WiFi.RSSI(i);
+    scanList[scanCount].open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+    scanCount++;
+  }
+  WiFi.scanDelete();
+  if (wasOff) WiFi.mode(WIFI_OFF);
+}
+
+static void openNetworks() {
+  scanForNetworks();
+  netSel = 0;
+  netTop = 0;
+  screen = Screen::Networks;
+  showList(false);
+}
+
+static void drawNetworks(bool full) {
+  gfx::clear();
+  header("Wi-Fi network");
+  const int n = scanCount + 1;  // the last row types a name by hand
+  for (int r = 0; r < kPickerRows && netTop + r < n; r++) {
+    const int i = netTop + r, y = kListTop + r * kPickerRowH;
+    const bool sel = i == netSel;
+    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, 8, true);
+    else frame(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6);
+    if (i < scanCount) {
+      const ScanEntry& e = scanList[i];
+      const bool current = config.ssid == e.ssid;
+      const char* extra = current ? "In use" : (e.open ? "Open" : "");
+      gfx::text(kMargin + 14, y + 16, gfx::ellipsize(e.ssid, 300), !sel);
+      if (*extra) gfx::text(gfx::W - kMargin - 14 - gfx::textWidth(extra), y + 16, extra, !sel);
+    } else {
+      gfx::text(kMargin + 14, y + 16, "Other network...", !sel);
+    }
+  }
+  if (scanCount == 0) gfx::text(kMargin, gfx::H - 130, "No networks found.");
+  drawHints(true, true, false);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
+}
+
+constexpr const char* kKbRows[3][4] = {
+    {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm._@"},
+    {"1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM._@"},
+    {"!@#$%^&*()", "-_=+[]{};:", "'\"<>,./?\\|", "~`:;#&*()+"},
+};
+constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330, kKbX = 20;
+// Bottom row: mode switch, space, cancel, done.
+constexpr int kBottomX[4] = {20, 130, 268, 368}, kBottomW[4] = {100, 128, 90, 92};
+
+static void openKeyboard(bool forSsid, const String& startText) {
+  kbForSsid = forSsid;
+  kbText = startText;
+  kbMode = 0;
+  kbRow = 1;
+  kbCol = 0;
+  screen = Screen::Keyboard;
+  showList(false);
+}
+
+static void drawKeyboard(bool full) {
+  gfx::clear();
+  header(kbForSsid ? "Network name" : "Wi-Fi password");
+  if (!kbForSsid) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
+  frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
+  // The text field shows the end of what was typed, with a cursor.
+  String shown = kbText;
+  while (shown.length() > 1 && gfx::textWidth(shown.c_str()) > gfx::W - 2 * kMargin - 40) shown.remove(0, 1);
+  shown += "_";
+  gfx::text(kMargin + 14, 124, shown.c_str());
+  gfx::text(kMargin, 184, kbMode == 1 ? "Capital letter" : kbMode == 2 ? "Symbols" : "Back deletes");
+  for (int r = 0; r < 4; r++) {
+    const char* keys = kKbRows[kbMode][r];
+    for (int c = 0; c < 10; c++) {
+      const int x = kKbX + c * kKeyW, y = kKbTop + r * kKeyPitch;
+      const bool sel = r == kbRow && c == kbCol;
+      if (sel) roundRect(x + 2, y, kKeyW - 4, kKeyH, 6, true); else frame(x + 2, y, kKeyW - 4, kKeyH, 6);
+      const char key[2] = {keys[c], 0};
+      gfx::text(x + (kKeyW - gfx::textWidth(key)) / 2, y + 11, key, !sel);
+    }
+  }
+  const char* modeNext = kbMode == 0 ? "ABC" : kbMode == 1 ? "123" : "abc";
+  const char* labels[4] = {modeNext, "Space", "Cancel", "Done"};
+  for (int k = 0; k < 4; k++) {
+    const int y = kKbTop + 4 * kKeyPitch;
+    const bool sel = kbRow == 4 && kbCol == k;
+    if (sel) roundRect(kBottomX[k], y, kBottomW[k], kKeyH, 6, true); else frame(kBottomX[k], y, kBottomW[k], kKeyH, 6);
+    gfx::text(kBottomX[k] + (kBottomW[k] - gfx::textWidth(labels[k])) / 2, y + 11, labels[k], !sel);
+  }
+  drawHints(true, true, true);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
+}
+
+static void keyboardMove(int dr, int dc) {
+  if (dr) {
+    const int old = kbRow;
+    kbRow = constrain(kbRow + dr, 0, 4);
+    if (kbRow == 4 && old != 4) kbCol = constrain(kbCol * 4 / 10, 0, 3);  // keep roughly the same x
+    if (old == 4 && kbRow != 4) kbCol = constrain((kBottomX[kbCol] + kBottomW[kbCol] / 2 - kKbX) / kKeyW, 0, 9);
+  }
+  if (dc) kbCol = constrain(kbCol + dc, 0, kbRow == 4 ? 3 : 9);
+}
+
+// OK on a key. Returns true when the keyboard was closed.
+static bool keyboardPress() {
+  if (kbRow < 4) {
+    kbText += kKbRows[kbMode][kbRow][kbCol];
+    if (kbMode == 1) kbMode = 0;  // capitals are one-shot
+    return false;
+  }
+  switch (kbCol) {
+    case 0: kbMode = (kbMode + 1) % 3; return false;
+    case 1: kbText += ' '; return false;
+    case 2: screen = Screen::Networks; return true;  // cancel: back to the list
+    default:
+      if (kbForSsid) {
+        if (kbText.isEmpty()) return false;
+        pendingSsid = kbText;
+        openKeyboard(false, "");  // now the password
+      } else {
+        saveWifiCreds(pendingSsid, kbText);
+        screen = Screen::Settings;
+      }
+      return true;
+  }
+}
+
+static void networkChosen() {
+  if (netSel >= scanCount) {  // other network: type its name first
+    pendingSsid = "";
+    openKeyboard(true, "");
+    return;
+  }
+  pendingSsid = scanList[netSel].ssid;
+  if (scanList[netSel].open) {
+    saveWifiCreds(pendingSsid, "");
+    screen = Screen::Settings;
+    showList(false);
+  } else {
+    openKeyboard(false, "");
+  }
+}
+
 static void drawScreen(bool full) {  // draws whichever screen is current
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
   else if (screen == Screen::Settings) drawSettings(full);
   else if (screen == Screen::Picker) drawPicker(full);
+  else if (screen == Screen::Networks) drawNetworks(full);
+  else if (screen == Screen::Keyboard) drawKeyboard(full);
   else drawList(full);
 }
 
@@ -1351,6 +1555,48 @@ void loop() {
     delay(10);
     return;
   }
+  if (screen == Screen::Keyboard) {
+    if (backClicked()) {  // Back deletes the last character
+      if (kbText.length()) kbText.remove(kbText.length() - 1);
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP)) {
+      keyboardMove(-1, 0);
+      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN)) {
+      keyboardMove(1, 0);
+      showList(false);
+    } else if (pressed(InputManager::BTN_LEFT)) {
+      keyboardMove(0, -1);
+      showList(false);
+    } else if (pressed(InputManager::BTN_RIGHT)) {
+      keyboardMove(0, 1);
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      keyboardPress();
+      showList(false);
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Networks) {
+    if (backClicked()) {  // leave: rejoin the saved network that the scan may have interrupted
+      screen = Screen::Settings;
+      if (net != Net::Online && !SdMan.exists(kWifiOffFlag)) startWifi();
+      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN) && netSel < scanCount) {
+      netSel++;
+      if (netSel >= netTop + kPickerRows) netTop = netSel - kPickerRows + 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && netSel > 0) {
+      netSel--;
+      if (netSel < netTop) netTop = netSel;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      networkChosen();
+    }
+    delay(10);
+    return;
+  }
   if (screen == Screen::Picker) {
     if (backHeld()) {
       toggleWifi();
@@ -1379,7 +1625,7 @@ void loop() {
     } else if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 2) {
+    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 3) {
       settingsSel++;
       showList(false);
     } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
@@ -1388,8 +1634,10 @@ void loop() {
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (settingsSel == 0) {
         toggleWifi();  // redraws by itself
+      } else if (settingsSel == 1) {
+        openNetworks();
       } else {
-        openPicker(settingsSel == 1 ? 0 : 1);
+        openPicker(settingsSel == 2 ? 0 : 1);
         showList(false);
       }
     }
