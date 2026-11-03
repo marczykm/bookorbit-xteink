@@ -263,6 +263,7 @@ enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline =
 constexpr uint32_t kNetKeepMs = 2 * 60 * 1000;  // how long Wi-Fi stays on after the last request
 uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off kNetKeepMs later
 int netDepth = 0;         // requests in flight
+bool netSaving = false;   // the radio is in modem-sleep (low power) while connected but quiet
 uint32_t netStart = 0;
 String offlineReason;
 
@@ -1528,6 +1529,7 @@ static void pumpDisplay() {
 // ---- Actions -------------------------------------------------------------------------------------------------
 
 static bool connectWifi(String& error) {
+  netSaving = false;
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
   WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
@@ -1559,6 +1561,7 @@ static void backgroundSync();
 static void goOffline() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  netSaving = false;
   delay(150);  // let the driver finish stopping before anything starts it again
   net = Net::Offline;
   Serial.println("wifi off");
@@ -1600,6 +1603,10 @@ static bool goOnline(String& error, bool announce = true) {
 
 // Switches the radio off once nothing has used the server for two minutes (so browsing and downloading in a row stay connected).
 static void netIdle() {
+  if (net == Net::Online && netDepth == 0 && !netSaving && millis() - lastNetUse > 3000) {
+    WiFi.setSleep(WIFI_PS_MIN_MODEM);  // connected but quiet: let the radio doze between the router's beacons
+    netSaving = true;
+  }
   if (net != Net::Online || netDepth > 0 || millis() - lastNetUse < kNetKeepMs) return;
   goOffline();
   showList(false);
@@ -2094,6 +2101,10 @@ void setup() {
   BookOrbit::setActivityHook([](bool active) {  // free the refresh shadow while the radio moves data
     lastNetUse = millis();
     if (active) {
+      if (netSaving) {  // back to full speed for the request
+        WiFi.setSleep(false);
+        netSaving = false;
+      }
       if (netDepth++ == 0) gfx::setLowMemory(true);
     } else if (netDepth > 0 && --netDepth == 0) {
       gfx::setLowMemory(false);
