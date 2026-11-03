@@ -4,5 +4,6 @@
   "server": "http://192.168.1.4:3000",
   "username": "demo",
   "password": "demo",
-  "insecureTls": false
+  "insecureTls": false,
+  "timezone": "CET-1CEST,M3.5.0,M10.5.0/3"
 }

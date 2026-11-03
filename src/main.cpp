@@ -11,6 +11,7 @@
 #include "bookorbit.h"
 #include "config.h"
 #include "cover.h"
+#include "pets.h"
 #include "gfx.h"
 #include "reader.h"
 #include <ArduinoJson.h>
@@ -36,6 +37,8 @@ RTC_NOINIT_ATTR uint32_t readMagic;
 RTC_NOINIT_ATTR char readPath[160];
 
 RTC_NOINIT_ATTR float readServerPercent;  // progress the server holds for the book, -1 when unknown
+constexpr uint32_t kLibraryMagic = 0x4C494252;
+RTC_NOINIT_ATTR uint32_t openLibraryMagic;  // set when closing a book so the device returns to the library, not Home
 RTC_NOINIT_ATTR long readFileId;  // server file id of the open book, 0 when unknown
 
 // Progress made offline waits in this file ("<fileId> <percent>" per line) until the library has Wi-Fi again.
@@ -222,6 +225,12 @@ constexpr int kListTop = 64;
 Book books[kPageSize];
 int bookCount = 0, bookTotal = 0, page = 0, selected = 0;
 int fastRefreshes = 0;
+// Which screen is showing. Home is the entry point; Library is its only menu item for now.
+enum class Screen { Home, Library } screen = Screen::Home;
+bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
+int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
+bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
+
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
 enum class Net { Connecting, Online, Offline } net = Net::Offline;
 uint32_t netStart = 0;
@@ -285,7 +294,7 @@ constexpr int kBusyDotX = gfx::W - kMargin - 37 - 14 - 26 - 14, kBusyDotY = 24;
 static void drawBusyDot() {
   for (int dy = -5; dy <= 5; dy++)
     for (int dx = -5; dx <= 5; dx++)
-      if (dx * dx + dy * dy <= 25) gfx::fillRect(kBusyDotX + dx, kBusyDotY + dy, 1, 1, false);
+      if (dx * dx + dy * dy <= 25) gfx::fillRect(kBusyDotX + dx, kBusyDotY + dy, 1, 1, true);
 }
 
 // Turning it on shows the dot straight away; callers redraw their screen when the request is done.
@@ -300,17 +309,17 @@ static void setBusy(bool on) {
 void testBusyDot() { setBusy(true); busy = false; }  // test hook: show the dot without a request
 
 static void header(const char* title) {
-  gfx::fillRect(0, 0, gfx::W, 48, true);
-  gfx::text(kMargin, 7, title, false);
+  gfx::fillRect(0, 46, gfx::W, 2, true);  // light header: dark text on the page, a rule below
+  gfx::text(kMargin, 7, title, true);
   const int batX = gfx::W - kMargin - 37;
-  gfx::batteryIcon(batX, 15, battery.readPercentage(), false);
+  gfx::batteryIcon(batX, 15, battery.readPercentage(), true);
   // Wi-Fi: strength arcs when online, just the dot while connecting, crossed out when offline.
   int arcs = net == Net::Offline ? 3 : 0;  // offline: the full icon, crossed out
   if (net == Net::Online && WiFi.status() == WL_CONNECTED) {
     const int rssi = WiFi.RSSI();
     arcs = rssi > -70 ? 3 : rssi > -82 ? 2 : 1;
   }
-  gfx::wifiIcon(batX - 14 - 26, 13, arcs, net == Net::Offline, false, net == Net::Offline);
+  gfx::wifiIcon(batX - 14 - 26, 13, arcs, net == Net::Offline, true, net == Net::Offline);
   if (busy) drawBusyDot();
 }
 
@@ -349,23 +358,32 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 // Hints sit directly above the four buttons along the bottom edge: Back, OK, Left, Right.
 constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
 
-static void drawHints() {
+static void drawHints(bool back = true, bool ok = true, bool paging = true) {
   const int top = gfx::H - 52, y = gfx::H - 42;
   gfx::fillRect(0, top, gfx::W, 2, true);
   const auto center = [](int i, int w) { return kButtonX[i] + (kButtonW - w) / 2; };
   // Back: a return arrow (shaft out to the right, down, and back left) so it isn't mistaken for the Left arrow.
   const int bx = center(0, 30), by = y + 6;
-  triangle(bx + 6, by, Dir::Left, true);
-  gfx::fillRect(bx + 8, by - 1, 20, 3, true);
-  gfx::fillRect(bx + 26, by - 1, 3, 15, true);
-  gfx::fillRect(bx + 10, by + 11, 19, 3, true);
+  if (back) {
+    triangle(bx + 6, by, Dir::Left, true);
+    gfx::fillRect(bx + 8, by - 1, 20, 3, true);
+    gfx::fillRect(bx + 26, by - 1, 3, 15, true);
+    gfx::fillRect(bx + 10, by + 11, 19, 3, true);
+  }
   // OK: a solid tick.
   const int ox = kButtonX[1] + kButtonW / 2, oy = y + 14;
-  for (int i = 0; i < 7; i++) gfx::fillRect(ox - 13 + i, oy - 1 + i, 4, 4, true);       // short stroke down-right
-  for (int i = 0; i < 15; i++) gfx::fillRect(ox - 7 + i, oy + 5 - i * 17 / 15, 4, 4, true);  // long stroke up-right
-  triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
-  triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
+  if (ok) {
+    for (int i = 0; i < 7; i++) gfx::fillRect(ox - 13 + i, oy - 1 + i, 4, 4, true);       // short stroke down-right
+    for (int i = 0; i < 15; i++) gfx::fillRect(ox - 7 + i, oy + 5 - i * 17 / 15, 4, 4, true);  // long stroke up-right
+  }
+  if (paging) {
+    triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
+    triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
+  }
 }
+
+// Text in a normal row (black) or a highlighted one (white on the black highlight).
+static void label(int x, int y, const char* s, bool highlighted) { gfx::text(x, y, s, !highlighted); }
 
 static void drawList(bool full) {
   gfx::clear();
@@ -384,25 +402,359 @@ static void drawList(bool full) {
     uint8_t bits[cover::kBytes];
     if (books[i].id && cover::load(books[i].id, bits)) gfx::blit1bit(kMargin + 1, y + 2, bits, cover::W, cover::H);
     const int textX = kMargin + cover::W + 2 + 14, textW = gfx::W - textX - 34;
-    gfx::text(textX, y + 8, gfx::ellipsize(books[i].title, textW), !sel);
-    gfx::text(textX, y + 8 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), !sel);
+    label(textX, y + 8, gfx::ellipsize(books[i].title, textW), sel);
+    label(textX, y + 8 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), sel);
     if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) gfx::fillRect(gfx::W - 24, y + 28, 12, 12, !sel);  // downloaded
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
   if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
   if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints();
-  // The first draw after power-on / wake / returning from a book uses the gentler half refresh: far less flashing than a full one.
-  static bool firstDraw = true;
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : firstDraw ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
+  halfNext = false;
 }
 
-static void showList(bool full) {
-  // Fast refreshes leave ghosting; clean up every few.
-  if (!full && ++fastRefreshes >= 8) full = true;
-  if (full) fastRefreshes = 0;
-  drawList(full);
+// ---- Home statistics (the same dashboard widgets as the Android app) ---------------------------------------------
+
+constexpr const char* kStatsFile = "/BookOrbit/.stats.json";
+constexpr const char* kStatTypes[] = {"reading-streak", "reading-goal", "reading-rhythm", "year-projection", "monthly-challenge", "library-overview"};
+
+struct Stats {
+  bool readingNow = false;
+  long nowId = 0, nowFileId = 0;
+  char nowTitle[96] = "", nowAuthor[64] = "";
+  float nowProgress = 0;
+  bool streak = false, goal = false, rhythm = false, projection = false, challenge = false, overview = false;
+  int streakDays = 0, longest = 0;
+  bool week[7] = {};
+  int goalDone = 0, goalBooks = 0, goalYear = 0;
+  int minutes[7] = {}, nDays = 0, avgMin = 0, consistency = 0;
+  int projBooks = 0, projDone = 0;
+  char trend[8] = "";
+  char challengeTitle[48] = "";
+  int chProgress = 0, chTarget = 1;
+  bool chDone = false;
+  int books = 0, authors = 0, series = 0, addedYear = 0;
+  bool any() const { return readingNow || streak || goal || rhythm || projection || challenge || overview; }
+} stats;
+
+static void parseStats(const String& json) {
+  stats = Stats();
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return;
+  if (JsonObject d = doc["reading-now"]; !d.isNull()) {
+    stats.readingNow = true;
+    stats.nowId = d["id"] | 0L;
+    stats.nowFileId = d["fileId"] | 0L;
+    strlcpy(stats.nowTitle, d["title"] | "", sizeof(stats.nowTitle));
+    strlcpy(stats.nowAuthor, d["author"] | "", sizeof(stats.nowAuthor));
+    stats.nowProgress = d["progress"] | 0.0f;
+  }
+  if (JsonObject d = doc["reading-streak"]; !d.isNull()) {
+    stats.streak = true;
+    stats.streakDays = d["currentStreak"] | 0;
+    stats.longest = d["longestStreak"] | 0;
+    int i = 0;
+    for (JsonVariant v : d["lastSevenDays"].as<JsonArray>()) if (i < 7) stats.week[i++] = v.as<bool>();
+  }
+  if (JsonObject d = doc["reading-goal"]; !d.isNull()) {
+    stats.goal = true;
+    stats.goalDone = d["completedBooks"] | 0;
+    stats.goalBooks = d["goalBooks"] | 0;
+    stats.goalYear = d["year"] | 0;
+  }
+  if (JsonObject d = doc["reading-rhythm"]; !d.isNull()) {
+    stats.rhythm = true;
+    for (JsonObject day : d["days"].as<JsonArray>()) if (stats.nDays < 7) stats.minutes[stats.nDays++] = (int)((day["readingSeconds"] | 0.0) / 60);
+    stats.avgMin = (int)((d["avgSecondsPerDay"] | 0.0) / 60);
+    stats.consistency = d["consistencyPercent"] | 0;
+  }
+  if (JsonObject d = doc["year-projection"]; !d.isNull()) {
+    stats.projection = true;
+    stats.projBooks = d["projectedBooks"] | 0;
+    stats.projDone = d["booksCompletedYtd"] | 0;
+    strlcpy(stats.trend, d["trend"] | "", sizeof(stats.trend));
+  }
+  if (JsonObject d = doc["monthly-challenge"]; !d.isNull()) {
+    stats.challenge = true;
+    strlcpy(stats.challengeTitle, d["title"] | "", sizeof(stats.challengeTitle));
+    stats.chProgress = d["progress"] | 0;
+    stats.chTarget = max(1, (int)(d["target"] | 1));
+    stats.chDone = d["completed"] | false;
+  }
+  if (JsonObject d = doc["library-overview"]; !d.isNull()) {
+    stats.overview = true;
+    stats.books = d["totalBooks"] | 0;
+    stats.authors = d["totalAuthors"] | 0;
+    stats.series = d["totalSeries"] | 0;
+    stats.addedYear = d["booksAddedThisYear"] | 0;
+  }
+}
+
+static void loadStatsCache() {
+  if (SdMan.exists(kStatsFile)) parseStats(SdMan.readFile(kStatsFile));
+}
+
+// Fetches fresh numbers (online only) and caches them; returns true when the displayed stats changed.
+static bool refreshStats() {
+  String json, error;
+  if (!api.fetchWidgets(kStatTypes, sizeof(kStatTypes) / sizeof(kStatTypes[0]), json, error)) {
+    Serial.printf("stats: %s\n", error.c_str());
+    return false;
+  }
+  Book now;
+  float nowProgress = 0;
+  bool found = false;
+  if (api.fetchContinueReading(now, nowProgress, found, error) && found) {  // add the book being read to the cached document
+    JsonDocument doc;
+    deserializeJson(doc, json);
+    doc["reading-now"]["id"] = now.id;
+    doc["reading-now"]["fileId"] = now.fileId;
+    doc["reading-now"]["title"] = now.title;
+    doc["reading-now"]["author"] = now.author;
+    doc["reading-now"]["progress"] = nowProgress;
+    json = "";
+    serializeJson(doc, json);
+  }
+  const String before = SdMan.exists(kStatsFile) ? SdMan.readFile(kStatsFile) : String();
+  if (json == before) return false;
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.writeFile(kStatsFile, json);
+  parseStats(json);
+  Serial.println("stats refreshed");
+  return true;
+}
+
+// Filled rectangle with rounded corners of radius r.
+static void roundRect(int x, int y, int w, int h, int r, bool black) {
+  for (int j = 0; j < h; j++) {
+    const int fromEdge = j < r ? r - j : (j >= h - r ? j - (h - r) + 1 : 0);
+    int inset = 0;
+    if (fromEdge > 0) inset = r - (int)sqrtf((float)(r * r - (fromEdge - 0.5f) * (fromEdge - 0.5f)));
+    gfx::fillRect(x + inset, y + j, w - 2 * inset, 1, black);
+  }
+}
+
+// A 2 px outline with slightly rounded corners; `solid` fills it black (the highlighted state).
+static void frame(int x, int y, int w, int h, int r = 8, bool solid = false) {
+  roundRect(x, y, w, h, r, true);
+  if (!solid) roundRect(x + 2, y + 2, w - 4, h - 4, max(0, r - 2), false);
+}
+
+static void card(int x, int y, int w, int h, const char* title) {
+  frame(x, y, w, h);
+  gfx::text(x + 10, y + 5, gfx::ellipsize(title, w - 20));
+}
+
+static void bar(int x, int y, int w, int h, float fraction, bool inverse = false) {
+  if (inverse) {  // white outline and fill on a dark background
+    roundRect(x, y, w, h, 4, false);
+    roundRect(x + 2, y + 2, w - 4, h - 4, 2, true);
+  } else {
+    frame(x, y, w, h, 4);
+  }
+  const int fill = (int)((w - 8) * constrain(fraction, 0.0f, 1.0f));
+  if (fill > 0) roundRect(x + 4, y + 4, fill, h - 8, 2, !inverse);
+}
+
+static void dot(int cx, int cy, int r, bool filled) {
+  for (int dy = -r; dy <= r; dy++)
+    for (int dx = -r; dx <= r; dx++) {
+      const int d2 = dx * dx + dy * dy;
+      if (filled ? d2 <= r * r : (d2 <= r * r && d2 > (r - 2) * (r - 2))) gfx::fillRect(cx + dx, cy + dy, 1, 1, true);
+    }
+}
+
+// ---- Reading companion (the Android app's pet widget) -----------------------------------------------------------
+
+constexpr const char* kPetFile = "/BookOrbit/.pet";
+constexpr const char* kPetBaseFile = "/BookOrbit/.petbase";  // "<date> <books completed that morning>"
+int petIndex = 0;
+
+static void loadPet() {
+  if (SdMan.exists(kPetFile)) petIndex = constrain(atoi(SdMan.readFile(kPetFile).c_str()), 0, pets::kCount - 1);
+}
+
+static void nextPet() {
+  petIndex = (petIndex + 1) % pets::kCount;
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.writeFile(kPetFile, String(petIndex));
+}
+
+// Same rules as the Android app and the KOReader plugin: one pose for the current situation.
+static pets::Pose petPose(int hour, bool finishedToday) {
+  const int streak = stats.streakDays, longest = stats.longest;
+  const int todayMin = stats.nDays ? stats.minutes[stats.nDays - 1] : 0;
+  const bool milestone = streak == 7 || streak == 30 || streak == 50 || streak == 100 || streak == 200 || streak == 365;
+  if (!stats.readingNow && streak == 0) return pets::Wait;
+  if (todayMin <= 0) return pets::Sleep;
+  if (finishedToday) return pets::Ribbon;
+  if (milestone || (streak > 1 && streak >= longest)) return pets::Party;
+  if (hour >= 22 || hour < 5) return pets::Yawn;
+  return pets::Read;
+}
+
+// A book counts as finished today when the year's completed count grew since the day began.
+static bool petFinishedToday(const char* today) {
+  if (!stats.goal) return false;
+  String saved = SdMan.exists(kPetBaseFile) ? SdMan.readFile(kPetBaseFile) : String();
+  if (!saved.startsWith(today)) {
+    SdMan.ensureDirectoryExists("/BookOrbit");
+    SdMan.writeFile(kPetBaseFile, String(today) + " " + String(stats.goalDone));
+    return false;
+  }
+  return stats.goalDone > atoi(saved.c_str() + strlen(today) + 1);
+}
+
+static String petDuration(int min) { return min >= 60 ? String(min / 60) + " h " + String(min % 60) + " min" : String(min) + " min"; }
+
+static void drawPet(int x, int y, bool sel) {
+  int hour = 12;
+  char today[16] = "";
+  if (clockValid()) {
+    struct tm tmv;
+    const time_t now = time(nullptr);
+    localtime_r(&now, &tmv);
+    hour = tmv.tm_hour;
+    strftime(today, sizeof(today), "%Y-%m-%d", &tmv);
+  }
+  const bool finished = *today && petFinishedToday(today);
+  const pets::Pose pose = petPose(hour, finished);
+  const int streak = stats.streakDays, todayMin = stats.nDays ? stats.minutes[stats.nDays - 1] : 0;
+  String line1, line2;
+  switch (pose) {
+    case pets::Read: line1 = "Reading with you"; line2 = petDuration(todayMin) + " today"; break;
+    case pets::Sleep: line1 = "Fast asleep"; line2 = "Wakes up when you read"; break;
+    case pets::Party: line1 = String(streak) + (streak == 1 ? " day" : " days") + " in a row!"; line2 = streak >= stats.longest ? "A new best" : "Your best is " + String(stats.longest); break;
+    case pets::Ribbon: line1 = "Book finished!"; break;
+    case pets::Yawn: line1 = "Past bedtime"; line2 = petDuration(todayMin) + " read today"; break;
+    default: line1 = "Ready when you are"; line2 = "Open a book to start"; break;
+  }
+  const int w = gfx::W - 2 * kMargin;
+  frame(x, y, w, 80, 8, sel);
+  roundRect(x + 7, y + 7, 66, 66, 4, false);  // white plate under the sprite
+  gfx::blit1bit(x + 8, y + 8, pets::kSprites[petIndex][pose], 64, 64);
+  label(x + 84, y + 6, line1.c_str(), sel);
+  if (line2.length()) label(x + 84, y + 30, line2.c_str(), sel);
+  if (sel) label(x + 84, y + 52, (String(pets::kNames[petIndex]) + " - OK for the next one").c_str(), sel);
+}
+
+// The stats panel under the Home menu: y from 146 down to 700.
+static void drawStats() {
+  if (!stats.any()) {
+    gfx::text(kMargin, 172, "Statistics appear after the first sync.");
+    return;
+  }
+  constexpr int kHalf = 220, kRight = kMargin + kHalf + 8, kFull = gfx::W - 2 * kMargin;
+  char buf[64];
+  int y = 146;
+  if (stats.readingNow) {  // the book being read: cover, title, author, progress
+    const bool sel = homeSel == 1;  // selected: dark like the selected Library row, with light text
+    frame(kMargin, y, kFull, 96, 8, sel);
+    label(kMargin + 68, y + 1, "Reading now", sel);
+    roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, false);  // white plate so the cover shows on dark too
+    roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, true);
+    gfx::fillRect(kMargin + 10, y + 13, cover::W, cover::H, false);
+    uint8_t bits[cover::kBytes];
+    if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
+    label(kMargin + 68, y + 24, gfx::ellipsize(stats.nowTitle, kFull - 80), sel);
+    label(kMargin + 68, y + 46, gfx::ellipsize(stats.nowAuthor, kFull - 80), sel);
+    bar(kMargin + 68, y + 78, kFull - 68 - 70, 12, stats.nowProgress / 100.0f, sel);
+    snprintf(buf, sizeof(buf), "%d%%", (int)stats.nowProgress);
+    label(kMargin + kFull - 62, y + 62, buf, sel);
+    y += 102;
+  }
+  drawPet(kMargin, y, homeSel == 2);
+  y += 86;
+  if (stats.streak) {
+    card(kMargin, y, kHalf, 124, "Reading streak");
+    snprintf(buf, sizeof(buf), "%d day%s", stats.streakDays, stats.streakDays == 1 ? "" : "s");
+    gfx::bigText(kMargin + 10, y + 30, buf, 32);
+    for (int i = 0; i < 7; i++) dot(kMargin + 18 + i * 29, y + 84, 7, stats.week[i]);
+    snprintf(buf, sizeof(buf), "Longest: %d", stats.longest);
+    gfx::text(kMargin + 10, y + 92, buf);
+  }
+  if (stats.goal) {
+    snprintf(buf, sizeof(buf), "%d goal", stats.goalYear);
+    card(kRight, y, kHalf, 124, buf);
+    if (stats.goalBooks > 0) {
+      snprintf(buf, sizeof(buf), "%d / %d", stats.goalDone, stats.goalBooks);
+      gfx::bigText(kRight + 10, y + 30, buf, 32);
+      bar(kRight + 10, y + 74, kHalf - 20, 16, (float)stats.goalDone / stats.goalBooks);
+      gfx::text(kRight + 10, y + 92, "books");
+    } else {
+      snprintf(buf, sizeof(buf), "%d read", stats.goalDone);
+      gfx::bigText(kRight + 10, y + 30, buf, 32);
+      gfx::text(kRight + 10, y + 78, "No goal set");
+    }
+  }
+  y += 130;
+  if (stats.rhythm) {
+    card(kMargin, y, kFull, 106, "Reading rhythm");
+    int mx = 1;
+    for (int i = 0; i < stats.nDays; i++) mx = max(mx, stats.minutes[i]);
+    for (int i = 0; i < stats.nDays; i++) {
+      const int h = max(3, 36 * stats.minutes[i] / mx);
+      roundRect(kMargin + 10 + i * 62, y + 70 - h, 50, h, 3, true);
+    }
+    snprintf(buf, sizeof(buf), "%d min/day, %d%% of days read", stats.avgMin, stats.consistency);
+    gfx::text(kMargin + 10, y + 73, gfx::ellipsize(buf, kFull - 20));
+  }
+  y += 112;
+  if (stats.projection) {
+    snprintf(buf, sizeof(buf), "On pace for %d", stats.goalYear);
+    card(kMargin, y, kHalf, 124, stats.goalYear ? buf : "On pace for the year");
+    snprintf(buf, sizeof(buf), "%d books", stats.projBooks);
+    gfx::bigText(kMargin + 10, y + 28, buf, 30);
+    snprintf(buf, sizeof(buf), "%d done so far", stats.projDone);
+    gfx::text(kMargin + 10, y + 64, buf);
+    snprintf(buf, sizeof(buf), "Trending %s", stats.trend);
+    if (*stats.trend && strcmp(stats.trend, "flat")) gfx::text(kMargin + 10, y + 92, buf);
+  }
+  if (stats.challenge) {
+    card(kRight, y, kHalf, 124, "Monthly challenge");
+    gfx::text(kRight + 10, y + 34, gfx::ellipsize(stats.challengeTitle, kHalf - 20));
+    bar(kRight + 10, y + 72, kHalf - 20, 16, (float)stats.chProgress / stats.chTarget);
+    snprintf(buf, sizeof(buf), stats.chDone ? "Completed" : "%d / %d", stats.chProgress, stats.chTarget);
+    gfx::text(kRight + 10, y + 92, buf);
+  }
+}
+
+// Home: a menu with a single item for now.
+static void drawHome(bool full) {
+  gfx::clear();
+  header("BookOrbit");
+  if (!stats.readingNow && homeSel == 1) homeSel = 0;
+  const int y = kListTop;
+  const bool sel = homeSel == 0;
+  frame(kMargin, y, gfx::W - 2 * kMargin, kRowHeight - 4, 8, sel);
+  // Book icon: two covers side by side with a spine gap.
+  const int ix = kMargin + 14, iy = y + 16;
+  gfx::fillRect(ix, iy, 40, 36, !sel);
+  gfx::fillRect(ix + 3, iy + 3, 16, 30, sel);
+  gfx::fillRect(ix + 21, iy + 3, 16, 30, sel);
+  if (stats.overview) {  // the library overview lives in the menu row
+    char counts[64];
+    snprintf(counts, sizeof(counts), "%d books, %d authors, %d series", stats.books, stats.authors, stats.series);
+    label(kMargin + 74, y + 6, "Library", sel);
+    label(kMargin + 74, y + 34, gfx::ellipsize(counts, gfx::W - kMargin - 12 - (kMargin + 74)), sel);
+  } else {
+    label(kMargin + 74, y + 20, "Library", sel);
+  }
+  drawStats();
+  if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
+  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
+  drawHints(true, true, false);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
+static void showList(bool full) {  // redraws whichever screen is current
+  // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
+  if (screen == Screen::Home) drawHome(full);
+  else drawList(full);
 }
 
 // ---- Actions -------------------------------------------------------------------------------------------------
@@ -508,9 +860,7 @@ static void waitForKey() {
 }
 
 // Opens the selected book, downloading it first when it isn't on the SD card yet.
-static void openSelected() {
-  if (bookCount == 0) return;
-  const Book& b = books[selected];
+static void openBook(const Book& b) {
   String path = BookOrbit::pathFor(b), error;
   if (net != Net::Online && !SdMan.exists(path.c_str())) {
     message("Not downloaded", net == Net::Connecting ? "This book is not on the SD card.\nStill connecting, try again\nin a moment.\n\nPress any button" : "This book is not on the SD card.\nHold Back in the list to connect.\n\nPress any button", false);
@@ -531,6 +881,7 @@ static void openSelected() {
     }
   }
   readMagic = kReadMagic;
+  openLibraryMagic = screen == Screen::Library ? kLibraryMagic : 0;  // Back from the book returns to where it was opened
   readFileId = b.fileId;
   readServerPercent = -1;
   float serverPct;
@@ -539,6 +890,20 @@ static void openSelected() {
   Serial.printf("restarting into reader: %s\n", readPath);
   delay(100);
   ESP.restart();
+}
+
+static void openSelected() {
+  if (bookCount > 0) openBook(books[selected]);
+}
+
+// The book shown in the Home "Reading now" card.
+static void openReadingNow() {
+  Book b;
+  b.id = stats.nowId;
+  b.fileId = stats.nowFileId;
+  strlcpy(b.title, stats.nowTitle, sizeof(b.title));
+  strlcpy(b.author, stats.nowAuthor, sizeof(b.author));
+  openBook(b);
 }
 
 static void drawSleepScreen() {
@@ -572,7 +937,7 @@ static void closeBook() {
   checkpoint();
   reader::close();
   readFileId = 0;
-  ESP.restart();  // back to the library, with Wi-Fi
+  ESP.restart();  // back to where the book was opened from (see openBook)
 }
 
 static void readerLoop() {
@@ -634,10 +999,18 @@ void setup() {
     }
     fatal("Cannot open book", openError);
   }
+  loadStatsCache();
+  loadPet();
+  screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
+  openLibraryMagic = 0;
   String error;
   if (!config.load(error)) fatal("Setup needed", error + "\nSee config.example.json");
 
   api.configure(config.server, config.insecureTls);
+  if (config.timezone.length()) {
+    setenv("TZ", config.timezone.c_str(), 1);
+    tzset();
+  }
   if (loadCachedPage(0)) {  // show the library right away and connect in the background
     if (SdMan.exists(kWifiOffFlag)) {  // the user turned Wi-Fi off: stay offline until they turn it on
       net = Net::Offline;
@@ -667,6 +1040,7 @@ void setup() {
     flushProgress();
     flushSessions();
     net = Net::Online;
+    refreshStats();
     online = loadPage(0, error);
   }
   if (!online) fatal("Offline", error + "\n\nNo cached library yet.");
@@ -695,6 +1069,7 @@ static void backgroundSync() {
     flushProgress();
     flushSessions();
     net = Net::Online;
+    refreshStats();
     if (loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
@@ -711,8 +1086,10 @@ static void fetchNextCover() {
   static bool dirty = false;
   static uint32_t retryAfter = 0;
   if (net != Net::Online || millis() < retryAfter) return;
-  for (int i = 0; i < bookCount; i++) {
-    const long id = books[i].id;
+  // Candidates: the book being read now (shown on Home) and, on the library screen, the visible page.
+  const int n = bookCount + 1;
+  for (int k = 0; k < n; k++) {
+    const long id = k == 0 ? (stats.readingNow ? stats.nowId : 0) : (screen == Screen::Library ? books[k - 1].id : 0);
     if (!id || cover::cached(id)) continue;
     String error;
     if (api.fetchThumbnail(id, cover::stagingPath(), error) && cover::convertStaged(id, error)) {
@@ -753,12 +1130,23 @@ static void toggleWifi() {
 
 void testToggleWifi() { toggleWifi(); }
 
+// True once per short click of Back (on release, unless the press turned out to be a hold).
+static bool holdFired = false;
+static bool backClicked() {
+  if (injected == InputManager::BTN_BACK) { injected = -1; return true; }  // test hook
+  if (!input.wasReleased(InputManager::BTN_BACK)) return false;
+  const bool wasHold = holdFired;
+  holdFired = false;
+  return !wasHold;
+}
+
 // True once per press, when Back has been held for 800 ms.
 static bool backHeld() {
   static bool handled = false;
   if (!input.isPressed(InputManager::BTN_BACK)) { handled = false; return false; }
   if (handled || input.getHeldTime() < 800) return false;
   handled = true;
+  holdFired = true;
   return true;
 }
 
@@ -779,6 +1167,32 @@ void loop() {
     return;
   }
   backgroundSync();
+  if (screen == Screen::Home) {
+    if (backHeld()) {
+      toggleWifi();
+    } else if (pressed(InputManager::BTN_DOWN) && homeSel < 2) {
+      homeSel = (homeSel == 0 && !stats.readingNow) ? 2 : homeSel + 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && homeSel > 0) {
+      homeSel = (homeSel == 2 && !stats.readingNow) ? 0 : homeSel - 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      if (homeSel == 2) {
+        nextPet();
+        showList(false);
+      } else if (homeSel == 1 && stats.readingNow) {
+        openReadingNow();
+      } else {
+        screen = Screen::Library;
+        halfNext = true;
+        showList(true);
+      }
+    } else {
+      fetchNextCover();  // the Reading now cover
+    }
+    delay(10);
+    return;
+  }
   String error;
   if (backHeld()) {
     toggleWifi();
@@ -788,6 +1202,10 @@ void loop() {
   } else if (pressed(InputManager::BTN_UP) && selected > 0) {
     selected--;
     showList(false);
+  } else if (backClicked()) {
+    screen = Screen::Home;
+    halfNext = true;
+    showList(true);
   } else if (pressed(InputManager::BTN_CONFIRM)) {
     openSelected();
   } else if (pressed(InputManager::BTN_RIGHT) && (page + 1) * kPageSize < bookTotal) {
@@ -801,6 +1219,6 @@ void loop() {
     busy = false;
     if (ok) showList(true); else message("Error", error + "\n\nPress any button");
   }
-  else fetchNextCover();  // idle: fetch covers one at a time
+  else fetchNextCover();  // idle: fetch covers one at a time (library screen only)
   delay(10);
 }

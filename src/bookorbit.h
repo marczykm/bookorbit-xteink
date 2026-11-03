@@ -23,6 +23,10 @@ class BookOrbit {
   bool postSession(long fileId, const String& body, bool& rejected, String& error);
   // Reads the saved reading progress (0-100) of a book file.
   bool getProgress(long fileId, float& percentage, String& error);
+  // The book being read now (the first of the "continue reading" shelf), with its progress 0-100. `found` is false when the shelf is empty.
+  bool fetchContinueReading(Book& book, float& progress, bool& found, String& error);
+  // Fetches the dashboard widgets named in `types` and returns them as the server sent them, reduced to {"type":data} pairs.
+  bool fetchWidgets(const char* const* types, int count, String& json, String& error);
   // Saves a book's cover thumbnail (whatever image format the server sends) to `path`.
   bool fetchThumbnail(long bookId, const String& path, String& error);
   // Where download() stores the book on the SD card.
@@ -32,6 +36,8 @@ class BookOrbit {
 
  private:
   int listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error);
+  bool fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error);
+  bool fetchWidgetsOnce(const char* const* types, int count, String& json, String& error);
   bool fetchThumbnailOnce(long bookId, const String& path, String& error);
   bool postSessionOnce(long fileId, const String& body, bool& rejected, String& error);
   bool postProgressOnce(long fileId, float percentage, String& error);

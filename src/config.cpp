@@ -19,6 +19,7 @@ bool Config::load(String& error) {
   username = doc["username"] | "";
   password = doc["password"] | "";
   insecureTls = doc["insecureTls"] | false;
+  timezone = doc["timezone"] | "";
   while (server.endsWith("/")) server.remove(server.length() - 1);
   if (ssid.isEmpty() || server.isEmpty() || username.isEmpty()) {
     error = "/bookorbit.json needs ssid, server and username";

@@ -128,12 +128,16 @@ void text(int x, int y, const char* s, bool black) {
   }
 }
 
-void bigTextCentered(int y, const char* s, int sizePx, bool black) {
+int bigTextWidth(const char* s, int sizePx) {
+  if (!ttfOn) return textWidth(s) * max(1, sizePx / font.yAdvance);
+  int w = 0;
+  for (const char* p = s; *p;) w += ttf.advance(nextChar(p), sizePx, 0);
+  return w;
+}
+
+void bigText(int x, int y, const char* s, int sizePx, bool black) {
   if (ttfOn) {
-    int w = 0;
-    for (const char* p = s; *p;) w += ttf.advance(nextChar(p), sizePx, 0);
     const int baseline = y + ttf.ascent(sizePx);
-    int x = (W - w) / 2;
     for (const char* p = s; *p;) {
       const uint32_t cp = nextChar(p);
       if (const auto* g = ttf.rasterize(cp, sizePx)) {
@@ -146,7 +150,6 @@ void bigTextCentered(int y, const char* s, int sizePx, bool black) {
     return;
   }
   const int scale = max(1, sizePx / font.yAdvance);  // no TTF: blow the bitmap font up
-  int x = (W - textWidth(s) * scale) / 2;
   for (const char* p = s; *p;) {
     const auto* g = glyphFor(nextChar(p));
     uint32_t bit = 0;
@@ -157,6 +160,8 @@ void bigTextCentered(int y, const char* s, int sizePx, bool black) {
     x += g->xAdvance * scale;
   }
 }
+
+void bigTextCentered(int y, const char* s, int sizePx, bool black) { bigText((W - bigTextWidth(s, sizePx)) / 2, y, s, sizePx, black); }
 
 void batteryIcon(int x, int y, int percent, bool black) {
   const int bodyW = 34, h = 18;

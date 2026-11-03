@@ -24,6 +24,9 @@ void batteryIcon(int x, int y, int percent, bool black);
 int lineHeight();
 // Large text horizontally centred with its top at y (needs loadUiFont(); falls back to a scaled bitmap font).
 void bigTextCentered(int y, const char* utf8, int sizePx, bool black = true);
+// Same at an explicit x (left edge), and its width.
+void bigText(int x, int y, const char* utf8, int sizePx, bool black = true);
+int bigTextWidth(const char* utf8, int sizePx);
 // Fits `utf8` into maxWidth pixels, ending with "..." when it has to cut. Returns a static buffer.
 const char* ellipsize(const char* utf8, int maxWidth);
 void flush(EInkDisplay::RefreshMode mode);

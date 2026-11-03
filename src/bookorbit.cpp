@@ -162,6 +162,84 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
   return n;
 }
 
+bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error) {
+  Conn client;
+  HTTPClient http;
+  found = false;
+  if (!begin(http, client, server_ + "/api/v1/dashboard/scrollers/batch", token_, error)) return false;
+  http.addHeader("Content-Type", "application/json");
+  JsonDocument body;
+  body["items"][0]["id"] = "continue";
+  body["items"][0]["type"] = "continue-reading";
+  body["items"][0]["limit"] = 1;
+  String payload;
+  serializeJson(body, payload);
+  const int code = http.POST(payload);
+  if (code != 200) {
+    error = errorFor(code);
+    http.end();
+    return false;
+  }
+  JsonDocument filter;
+  filter["items"][0]["books"][0]["id"] = true;
+  filter["items"][0]["books"][0]["title"] = true;
+  filter["items"][0]["books"][0]["authors"] = true;
+  filter["items"][0]["books"][0]["readingProgress"] = true;
+  filter["items"][0]["books"][0]["files"][0]["id"] = true;
+  filter["items"][0]["books"][0]["files"][0]["format"] = true;
+  JsonDocument doc;
+  const auto err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) {
+    error = String("Bad response: ") + err.c_str();
+    return false;
+  }
+  JsonObject b = doc["items"][0]["books"][0];
+  if (b.isNull()) return true;  // nothing in progress
+  book = Book();
+  book.id = b["id"] | 0L;
+  strlcpy(book.title, b["title"] | "(untitled)", sizeof(book.title));
+  strlcpy(book.author, b["authors"][0] | "", sizeof(book.author));
+  for (JsonObject f : b["files"].as<JsonArray>()) {
+    const char* fmt = f["format"] | "";
+    if (strcasecmp(fmt, "epub") == 0 || strcasecmp(fmt, "kepub") == 0) { book.fileId = f["id"] | 0L; break; }
+  }
+  progress = b["readingProgress"] | 0.0f;
+  found = book.id != 0;
+  return true;
+}
+
+bool BookOrbit::fetchWidgetsOnce(const char* const* types, int count, String& json, String& error) {
+  Conn client;
+  HTTPClient http;
+  if (!begin(http, client, server_ + "/api/v1/dashboard/widgets/batch", token_, error)) return false;
+  http.addHeader("Content-Type", "application/json");
+  JsonDocument body;
+  for (int i = 0; i < count; i++) body["widgets"][i] = types[i];
+  String payload;
+  serializeJson(body, payload);
+  const int code = http.POST(payload);
+  if (code != 200) {
+    error = errorFor(code);
+    http.end();
+    return false;
+  }
+  JsonDocument doc;
+  const auto err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) {
+    error = String("Bad response: ") + err.c_str();
+    return false;
+  }
+  JsonDocument out;  // {"type": data, ...} for the widgets the server had data for
+  for (JsonObject item : doc["items"].as<JsonArray>()) {
+    const char* type = item["type"] | "";
+    if (*type && !item["data"].isNull()) out[type] = item["data"];
+  }
+  serializeJson(out, json);
+  return true;
+}
+
 bool BookOrbit::fetchThumbnailOnce(long bookId, const String& path, String& error) {
   Conn client;
   HTTPClient http;
@@ -339,6 +417,18 @@ int BookOrbit::listBooks(int page, int pageSize, Book* out, int max, int& total,
   int n = listBooksOnce(page, pageSize, out, max, total, error);
   if (n < 0 && unauthorized(error) && refresh()) n = listBooksOnce(page, pageSize, out, max, total, error);
   return n;
+}
+
+bool BookOrbit::fetchContinueReading(Book& book, float& progress, bool& found, String& error) {
+  bool ok = fetchContinueReadingOnce(book, progress, found, error);
+  if (!ok && unauthorized(error) && refresh()) ok = fetchContinueReadingOnce(book, progress, found, error);
+  return ok;
+}
+
+bool BookOrbit::fetchWidgets(const char* const* types, int count, String& json, String& error) {
+  bool ok = fetchWidgetsOnce(types, count, json, error);
+  if (!ok && unauthorized(error) && refresh()) ok = fetchWidgetsOnce(types, count, json, error);
+  return ok;
 }
 
 bool BookOrbit::fetchThumbnail(long bookId, const String& path, String& error) {
