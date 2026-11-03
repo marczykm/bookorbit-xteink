@@ -1745,11 +1745,12 @@ static void closeBook() {
   ESP.restart();  // back to where the book was opened from (see openBook)
 }
 
-// The reader menu (OK while reading): Contents and Text size. Up/Down pick, OK chooses, Back goes up a level.
-enum class RMenu { None, Main, Size, Toc };
+// The reader menu (OK while reading): Contents, Text size and Margins. Up/Down pick, OK chooses, Back goes up a level.
+enum class RMenu { None, Main, Size, Margin, Toc };
 static RMenu readerMenu = RMenu::None;
 static int readerMenuSel = 0, tocTop = 0;
-static int mainItems[2], mainCount = 0;  // 0 = Contents, 1 = Text size
+static int mainItems[3], mainCount = 0;  // 0 = Contents, 1 = Text size, 2 = Margins
+constexpr const char* kMarginNames[] = {"Narrow", "Normal", "Wide", "Wider"};
 
 static void drawMenuBox(const char* title, int rows, int h, int& x, int& y, int& w) {
   w = 230;
@@ -1771,7 +1772,7 @@ static void drawReaderMenu() {
       const int ry = y + 40 + i * rowH;
       const bool sel = i == readerMenuSel;
       if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
-      gfx::bigText(x + 22, ry + 4, mainItems[i] == 0 ? "Contents" : "Text size", 18, !sel);
+      gfx::bigText(x + 22, ry + 4, mainItems[i] == 0 ? "Contents" : mainItems[i] == 1 ? "Text size" : "Margins", 18, !sel);
     }
   } else if (readerMenu == RMenu::Size) {
     constexpr int n = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
@@ -1782,6 +1783,17 @@ static void drawReaderMenu() {
       if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
       char row[24];
       snprintf(row, sizeof(row), "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
+      gfx::bigText(x + 22, ry + 4, row, 18, !sel);
+    }
+  } else if (readerMenu == RMenu::Margin) {
+    constexpr int n = sizeof(reader::kMargins) / sizeof(reader::kMargins[0]);
+    drawMenuBox("Margins", n, 50 + n * rowH, x, y, w);
+    for (int i = 0; i < n; i++) {
+      const int ry = y + 40 + i * rowH;
+      const bool sel = i == readerMenuSel;
+      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
+      char row[24];
+      snprintf(row, sizeof(row), "%s%s", kMarginNames[i], reader::kMargins[i] == reader::margin() ? "  *" : "");
       gfx::bigText(x + 22, ry + 4, row, 18, !sel);
     }
   } else if (readerMenu == RMenu::Toc) {
@@ -1817,6 +1829,7 @@ static void openReaderMenu() {
   mainCount = 0;
   if (reader::tocCount() > 0) mainItems[mainCount++] = 0;
   mainItems[mainCount++] = 1;
+  mainItems[mainCount++] = 2;
   readerMenu = RMenu::Main;
   readerMenuSel = 0;
   reader::uiFont(true);
@@ -1826,7 +1839,7 @@ static void openReaderMenu() {
 static void readerMenuLoop() {
   const bool down = pressed(InputManager::BTN_DOWN) || pressed(InputManager::BTN_RIGHT);
   const bool up = !down && (pressed(InputManager::BTN_UP) || pressed(InputManager::BTN_LEFT));
-  int count = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])) : reader::tocCount();
+  int count = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])) : readerMenu == RMenu::Margin ? (int)(sizeof(reader::kMargins) / sizeof(reader::kMargins[0])) : reader::tocCount();
   if (down || up) {
     readerMenuSel = (readerMenuSel + (down ? 1 : count - 1)) % max(1, count);
     drawReaderMenu();
@@ -1836,6 +1849,11 @@ static void readerMenuLoop() {
         readerMenu = RMenu::Toc;
         readerMenuSel = max(0, reader::tocCurrent());
         tocTop = 0;
+      } else if (mainItems[readerMenuSel] == 2) {
+        readerMenu = RMenu::Margin;
+        readerMenuSel = 1;
+        for (int i = 0; i < (int)(sizeof(reader::kMargins) / sizeof(reader::kMargins[0])); i++)
+          if (reader::kMargins[i] == reader::margin()) readerMenuSel = i;
       } else {
         readerMenu = RMenu::Size;
         readerMenuSel = 2;
@@ -1843,6 +1861,11 @@ static void readerMenuLoop() {
           if (reader::kFontSizes[i] == reader::fontSize()) readerMenuSel = i;
       }
       drawReaderMenu();
+    } else if (readerMenu == RMenu::Margin) {
+      const int px = reader::kMargins[readerMenuSel];
+      readerMenu = RMenu::None;
+      reader::uiFont(false);
+      if (!reader::setMargin(px)) reader::draw(false);
     } else if (readerMenu == RMenu::Size) {
       const int px = reader::kFontSizes[readerMenuSel];
       readerMenu = RMenu::None;

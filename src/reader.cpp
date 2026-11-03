@@ -31,6 +31,7 @@ constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the 
 constexpr size_t kFaceArena[3] = {14 * 1024, 8 * 1024, 8 * 1024};  // glyph caches: regular, bold, italic
 
 constexpr const char* kFontSizeFile = "/BookOrbit/.fontsize";
+constexpr const char* kMarginFile = "/BookOrbit/.margin";
 
 class SdBookSource : public BookSource {
  public:
@@ -335,6 +336,10 @@ bool open(const char* epubPath, String& error, float serverPercent) {
   s.params.pageHeight = gfx::H;
   s.params.marginLeft = 20;
   s.params.marginRight = 20;
+  if (SdMan.exists(kMarginFile)) {
+    const int px = atoi(SdMan.readFile(kMarginFile).c_str());
+    for (int opt : kMargins) if (opt == px) s.params.marginLeft = s.params.marginRight = px;
+  }
   s.params.marginTop = 24;
   s.params.marginBottom = 56;  // room for the page footer
   s.params.baseSizePx = s.ttf ? 22 : 24;
@@ -486,20 +491,22 @@ bool openToc(int i) {
 
 int fontSize() { return isOpen() ? st->params.baseSizePx : 0; }
 
-bool setFontSize(int px) {
-  if (!isOpen() || !st->pagesOpen || !st->ttf || px == st->params.baseSizePx) return false;
+// Re-lays out the current chapter with a new text size and/or side margin, staying at the same place in the text.
+static bool reflow(int px, int margin) {
   State& s = *st;
-  const int oldSize = s.params.baseSizePx;
-  const uint32_t chars = s.pages.charStart(s.page);  // stay at the same place in the text
+  const int oldSize = s.params.baseSizePx, oldMargin = s.params.marginLeft;
+  const uint32_t chars = s.pages.charStart(s.page);
   s.params.baseSizePx = px;
+  s.params.marginLeft = s.params.marginRight = margin;
   s.generation = layoutGenerationHash(s.params, kFontFingerprintTtf);
   String error;
   busyOnLayout = "Reflowing...";
-  Serial.printf("font size %d -> %d px\n", oldSize, px);
+  Serial.printf("layout %d px, margin %d (was %d, %d)\n", px, margin, oldSize, oldMargin);
   if (!openChapter(s.spine, error)) {
-    Serial.printf("font size change failed: %s\n", error.c_str());
+    Serial.printf("layout change failed: %s\n", error.c_str());
     busyOnLayout = nullptr;
-    s.params.baseSizePx = oldSize;  // keep reading at the old size
+    s.params.baseSizePx = oldSize;  // keep reading as before
+    s.params.marginLeft = s.params.marginRight = oldMargin;
     s.generation = layoutGenerationHash(s.params, kFontFingerprintTtf);
     openChapter(s.spine, error);
     return false;
@@ -508,9 +515,22 @@ bool setFontSize(int px) {
   s.page = chars ? s.pages.pageForChar(chars) : 0;
   SdMan.ensureDirectoryExists("/BookOrbit");
   SdMan.writeFile(kFontSizeFile, String(px));
+  SdMan.writeFile(kMarginFile, String(margin));
   savePosition();
   draw(true);
   return true;
+}
+
+bool setFontSize(int px) {
+  if (!isOpen() || !st->pagesOpen || !st->ttf || px == st->params.baseSizePx) return false;
+  return reflow(px, st->params.marginLeft);
+}
+
+int margin() { return isOpen() ? st->params.marginLeft : 0; }
+
+bool setMargin(int px) {
+  if (!isOpen() || !st->pagesOpen || px == st->params.marginLeft) return false;
+  return reflow(st->params.baseSizePx, px);
 }
 
 bool next(bool full) {

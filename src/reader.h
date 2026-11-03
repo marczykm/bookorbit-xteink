@@ -22,5 +22,8 @@ bool openToc(int i);   // jumps to the start of the entry's chapter and redraws;
 int fontSize();               // base text size in px of the open book
 bool setFontSize(int px);     // re-lays out and redraws at the same place in the text; saved for all books
 inline constexpr int kFontSizes[] = {18, 20, 22, 26, 30};  // px, smallest to largest
+int margin();                  // side margin in px of the open book
+bool setMargin(int px);        // like setFontSize: re-lays out at the same place in the text; saved for all books
+inline constexpr int kMargins[] = {8, 20, 32, 48};  // px: narrow, normal, wide, wider
 float progressPercent();  // 0-100, estimated from the chapter and page position
 }  // namespace reader
