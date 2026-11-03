@@ -401,7 +401,34 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 // Hints sit directly above the four buttons along the bottom edge: Back, OK, Left, Right.
 constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
 
-static void drawHints(bool back = true, bool ok = true, bool paging = true, bool settings = false) {
+// Two circular arrows (sync), about 28 px across and centered on (cx, cy).
+static void drawSyncIcon(int cx, int cy) {
+  constexpr float kR = 9.5f, kPi = 3.14159265f;
+  for (int dy = -14; dy <= 14; dy++)
+    for (int dx = -14; dx <= 14; dx++) {
+      const float d = sqrtf((float)(dx * dx + dy * dy));
+      if (d < kR - 1.8f || d > kR + 1.8f) continue;
+      float a = atan2f((float)dy, (float)dx) * 180.0f / kPi;  // -180..180, clockwise on screen
+      if (a < 0) a += 360.0f;
+      if ((a > 25 && a < 150) || (a > 205 && a < 330)) gfx::fillRect(cx + dx, cy + dy, 1, 1, true);
+    }
+  for (int k = 0; k < 2; k++) {  // an arrow head at the end of each arc, pointing clockwise
+    const float a = (k ? 330.0f : 150.0f) * kPi / 180.0f;
+    const float px = cx + kR * cosf(a), py = cy + kR * sinf(a);
+    const float tx = -sinf(a), ty = cosf(a), nx = cosf(a), ny = sinf(a);  // tangent (direction of travel) and radial
+    const float tipX = px + 6 * tx, tipY = py + 6 * ty;
+    const float b1x = px - 5 * nx, b1y = py - 5 * ny, b2x = px + 5 * nx, b2y = py + 5 * ny;
+    for (int y = cy - 16; y <= cy + 16; y++)
+      for (int x = cx - 16; x <= cx + 16; x++) {  // inside the triangle (tip, b1, b2)?
+        const float d1 = (x - b2x) * (tipY - b2y) - (tipX - b2x) * (y - b2y);
+        const float d2 = (x - b1x) * (b2y - b1y) - (b2x - b1x) * (y - b1y);
+        const float d3 = (x - tipX) * (b1y - tipY) - (b1x - tipX) * (y - tipY);
+        if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) gfx::fillRect(x, y, 1, 1, true);
+      }
+  }
+}
+
+static void drawHints(bool back = true, bool ok = true, bool paging = true, bool settings = false, bool sync = false) {
   const int top = gfx::H - 52, y = gfx::H - 42;
   gfx::fillRect(0, top, gfx::W, 2, true);
   const auto center = [](int i, int w) { return kButtonX[i] + (kButtonW - w) / 2; };
@@ -423,6 +450,7 @@ static void drawHints(bool back = true, bool ok = true, bool paging = true, bool
     triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
     triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
   }
+  if (sync) drawSyncIcon(kButtonX[2] + kButtonW / 2, y + 14);
   if (settings) {  // a gear above the fourth button
     const int gx = kButtonX[3] + kButtonW / 2, gy = y + 14;
     for (int dy = -13; dy <= 13; dy++)
@@ -825,7 +853,7 @@ static void drawHome(bool full) {
     label(kMargin + 74, y + 20, "Library", sel);
   }
   drawStats(y + kRowHeight - 4 + 6);
-  drawHints(true, true, false, true);
+  drawHints(true, true, false, true, true);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
   halfNext = false;
@@ -2092,6 +2120,24 @@ static void backgroundSync() {
 }
 
 
+// Home, third button: sends the reading progress and sessions and refreshes the statistics right now.
+static void manualSync() {
+  String error;
+  if (!goOnline(error)) {
+    syncModal("Sync failed", error);
+    delay(1500);
+    showList(false);
+    return;
+  }
+  syncModal("Syncing", "Progress and statistics...");
+  flushProgress();
+  flushSessions();
+  refreshStats();
+  syncModal("Synced", "Progress and statistics are up to date");
+  delay(900);
+  showList(false);
+}
+
 // The cover of the Reading now book is fetched once (one small download, decoded on the spot) while Home is idle and online.
 static void fetchReadingCover() {
   static uint32_t retryAfter = 0;
@@ -2159,6 +2205,8 @@ void loop() {
         screen = Screen::Browse;
         showList(false);
       }
+    } else if (pressed(InputManager::BTN_LEFT)) {
+      manualSync();
     } else {
       fetchReadingCover();  // idle: fetch the Reading now cover once
     }
