@@ -1,0 +1,8 @@
+{
+  "ssid": "MyWifi",
+  "wifiPassword": "wifi-password",
+  "server": "http://192.168.1.4:3000",
+  "username": "demo",
+  "password": "demo",
+  "insecureTls": false
+}
