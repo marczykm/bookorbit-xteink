@@ -45,8 +45,8 @@ RTC_NOINIT_ATTR char openScopeName[48];
 RTC_NOINIT_ATTR uint32_t openLibraryMagic;  // set when closing a book so the device returns to the library, not Home
 RTC_NOINIT_ATTR long readFileId;  // server file id of the open book, 0 when unknown
 
-// Progress made offline waits in this file ("<fileId> <percent>" per line) until the library has Wi-Fi again.
-// Present while the user has switched Wi-Fi off, so the choice survives restarts (opening a book restarts the device).
+// Progress waits in this file ("<fileId> <percent>" per line) until the device next has Wi-Fi. The furthest position is the
+// source of truth: a book's entry only ever moves forward, and the server is only told when it is behind.
 
 constexpr const char* kOutbox = "/BookOrbit/.progress";
 
@@ -59,7 +59,12 @@ static void queueProgress(long fileId, float percent) {
     int nl = old.indexOf('\n', start);
     if (nl < 0) nl = old.length();
     const String line = old.substring(start, nl);
-    if (line.length() && atol(line.c_str()) != fileId) out += line + "\n";
+    if (line.length() && atol(line.c_str()) != fileId) {
+      out += line + "\n";
+    } else if (line.length()) {  // this book was already waiting: never move it backwards
+      const int sp = line.indexOf(' ');
+      if (sp > 0) percent = max(percent, line.substring(sp + 1).toFloat());
+    }
     start = nl + 1;
   }
   out += String(fileId) + " " + String(percent, 1) + "\n";
@@ -81,7 +86,11 @@ static void flushProgress() {
     const int sp = line.indexOf(' ');
     if (!id || sp < 0) continue;
     String error;
-    if (api.postProgress(id, line.substring(sp + 1).toFloat(), error)) {
+    const float local = line.substring(sp + 1).toFloat();
+    float server = 0;
+    if (api.getProgress(id, server, error) && server >= local) {  // the server is already as far or further: keep it
+      Serial.printf("progress kept: file %ld is at %.1f%% on the server (device %.1f%%)\n", id, server, local);
+    } else if (api.postProgress(id, local, error)) {
       Serial.printf("progress synced: file %ld at %s%%\n", id, line.substring(sp + 1).c_str());
     } else {
       Serial.printf("progress sync failed: %s\n", error.c_str());
@@ -737,6 +746,22 @@ void testFakeNow() {  // test hook: pretend a book is in progress
 }
 
 // The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected.
+// Shortens `s` in place with "..." until it fits `maxW` at the given large size (UTF-8 safe).
+static void fitBig(char* s, int maxW, int size) {
+  if (gfx::bigTextWidth(s, size) <= maxW) return;
+  size_t n = strlen(s);
+  while (n > 0) {
+    n--;
+    while (n > 0 && (s[n] & 0xC0) == 0x80) n--;  // back to the start of a character
+    char tmp[100];
+    snprintf(tmp, sizeof(tmp), "%.*s...", (int)n, s);
+    if (gfx::bigTextWidth(tmp, size) <= maxW || n == 0) {
+      strlcpy(s, tmp, 100);
+      return;
+    }
+  }
+}
+
 static void drawReadingNow(int y, bool sel) {
   constexpr int kFull = gfx::W - 2 * kMargin;
   char buf[16];
@@ -747,8 +772,34 @@ static void drawReadingNow(int y, bool sel) {
   gfx::fillRect(kMargin + 10, y + 13, cover::W, cover::H, false);
   uint8_t bits[cover::kBytes];
   if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
-  label(kMargin + 68, y + 23, gfx::ellipsize(stats.nowTitle, kFull - 80), sel);
-  label(kMargin + 68, y + 44, gfx::ellipsize(stats.nowAuthor, kFull - 80), sel);
+  // The title in a larger face, on one line or wrapped onto two (the second one shortened with "...").
+  constexpr int kTitleW = kFull - 80;
+  int kTitleSize = 26;  // one line at 26; a long title is wrapped onto two lines at 24
+  char first[96], second[96] = "";
+  strlcpy(first, stats.nowTitle, sizeof(first));
+  if (gfx::bigTextWidth(first, kTitleSize) > kTitleW) {
+    kTitleSize = 24;
+    int cut = -1;  // the last space after which the first line still fits
+    for (int i = 0; first[i]; i++) {
+      if (first[i] != ' ') continue;
+      char save = first[i];
+      first[i] = 0;
+      const bool fits = gfx::bigTextWidth(first, kTitleSize) <= kTitleW;
+      first[i] = save;
+      if (!fits) break;
+      cut = i;
+    }
+    if (cut > 0) {
+      strlcpy(second, stats.nowTitle + cut + 1, sizeof(second));
+      first[cut] = 0;
+    }
+  }
+  const int lines = second[0] ? 2 : 1;
+  const int ty = lines == 2 ? y + 19 : y + 32;
+  fitBig(first, kTitleW, kTitleSize);
+  fitBig(second, kTitleW, kTitleSize);
+  gfx::bigText(kMargin + 68, ty, first, kTitleSize, !sel);
+  if (lines == 2) gfx::bigText(kMargin + 68, ty + 26, second, kTitleSize, !sel);
   bar(kMargin + 68, y + 79, kFull - 68 - 70, 12, stats.nowProgress / 100.0f, sel);
   snprintf(buf, sizeof(buf), "%d%%", (int)stats.nowProgress);
   label(kMargin + kFull - 62, y + 64, buf, sel);
