@@ -233,6 +233,8 @@ int fastRefreshes = 0;
 enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
+int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
+constexpr const char* kKeyboardFile = "/BookOrbit/.keyboard";
 int settingsSel = 0;  // Settings list: Wi-Fi on/off, network, server, username, password, companion, sleep timer
 int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
@@ -812,12 +814,12 @@ static void setSleep(int minutes) {
 static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
-  const char* names[7] = {"Wi-Fi", "Network", "Server", "Username", "Password", "Companion", "Sleep after"};
+  const char* names[8] = {"Wi-Fi", "Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
   String stars;
   for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
-  const String values[7] = {wifiValue(), config.ssid, config.server, config.username, stars, pets::kNames[petIndex], sleepText};
-  for (int i = 0; i < 7; i++) {
+  const String values[8] = {wifiValue(), config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText};
+  for (int i = 0; i < 8; i++) {
     const int y = kListTop + i * 72;
     const bool sel = i == settingsSel;
     if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 64, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 64);
@@ -828,7 +830,7 @@ static void drawSettings(bool full) {
   }
   // About: read-only facts.
   char line[96];
-  int y = kListTop + 7 * 72 + 14;
+  int y = kListTop + 8 * 72 + 14;
   snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
   gfx::text(kMargin, y, line);
   drawHints(true, true, false);
@@ -840,10 +842,11 @@ static void drawSettings(bool full) {
 // A list to choose one value from (companion or sleep timer), opened from Settings.
 constexpr int kPickerRows = 9, kPickerRowH = 70;
 
-static int pickerCount() { return pickerKind == 0 ? pets::kCount : (int)(sizeof(kSleepOptions) / sizeof(kSleepOptions[0])); }
-static String pickerLabel(int i) { return pickerKind == 0 ? String(pets::kNames[i]) : String(kSleepOptions[i]) + (kSleepOptions[i] == 1 ? " minute" : " minutes"); }
+static int pickerCount() { return pickerKind == 0 ? pets::kCount : pickerKind == 2 ? 2 : (int)(sizeof(kSleepOptions) / sizeof(kSleepOptions[0])); }
+static String pickerLabel(int i) { return pickerKind == 0 ? String(pets::kNames[i]) : pickerKind == 2 ? String(i == 0 ? "Key grid" : "Classic T9 (multi-tap)") : String(kSleepOptions[i]) + (kSleepOptions[i] == 1 ? " minute" : " minutes"); }
 static int pickerCurrent() {
   if (pickerKind == 0) return petIndex;
+  if (pickerKind == 2) return kbStyle;
   for (int i = 0; i < pickerCount(); i++) if (kSleepOptions[i] == sleepMinutes) return i;
   return 0;
 }
@@ -857,7 +860,7 @@ static void openPicker(int kind) {
 
 static void drawPicker(bool full) {
   gfx::clear();
-  header(pickerKind == 0 ? "Companion" : "Sleep after");
+  header(pickerKind == 0 ? "Companion" : pickerKind == 2 ? "Keyboard" : "Sleep after");
   const int n = pickerCount(), cur = pickerCurrent();
   for (int r = 0; r < kPickerRows && pickerTop + r < n; r++) {
     const int i = pickerTop + r, y = kListTop + r * kPickerRowH;
@@ -1035,17 +1038,25 @@ constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330, kKbX = 20;
 // Bottom row: mode switch, space, cancel, done.
 constexpr int kBottomX[4] = {20, 130, 268, 368}, kBottomW[4] = {100, 128, 90, 92};
 
+static void t9Reset();
+static void drawT9(bool full);
+
 static void openKeyboard(int target, const String& startText) {
   kbTarget = target;
   kbText = startText;
   kbMode = 0;
   kbRow = 1;
   kbCol = 0;
+  t9Reset();
   screen = Screen::Keyboard;
   showList(false);
 }
 
 static void drawKeyboard(bool full) {
+  if (kbStyle == 1) {
+    drawT9(full);
+    return;
+  }
   gfx::clear();
   static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
   header(titles[kbTarget]);
@@ -1090,7 +1101,27 @@ static void keyboardMove(int dr, int dc) {
   if (dc) kbCol = constrain(kbCol + dc, 0, kbRow == 4 ? 3 : 9);
 }
 
-// OK on a key. Returns true when the keyboard was closed.
+// Cancel (done = false) or accept (done = true) what was typed. Returns true when the keyboard was closed.
+static bool keyboardFinish(bool done) {
+  if (!done) {
+    screen = (kbTarget == KbSsid || kbTarget == KbWifiPassword) ? Screen::Networks : Screen::Settings;
+    return true;
+  }
+  if (kbTarget == KbSsid) {
+    if (kbText.isEmpty()) return false;
+    pendingSsid = kbText;
+    openKeyboard(KbWifiPassword, "");  // now the password
+  } else if (kbTarget == KbWifiPassword) {
+    saveWifiCreds(pendingSsid, kbText);
+    screen = Screen::Settings;
+  } else {
+    if (!saveAccountField(kbTarget, kbText)) return false;  // e.g. an address that is not http(s)://
+    screen = Screen::Settings;
+  }
+  return true;
+}
+
+// OK on a key of the grid keyboard. Returns true when the keyboard was closed.
 static bool keyboardPress() {
   if (kbRow < 4) {
     kbText += kKbRows[kbMode][kbRow][kbCol];
@@ -1100,23 +1131,93 @@ static bool keyboardPress() {
   switch (kbCol) {
     case 0: kbMode = (kbMode + 1) % 3; return false;
     case 1: kbText += ' '; return false;
-    case 2:  // cancel
-      screen = (kbTarget == KbSsid || kbTarget == KbWifiPassword) ? Screen::Networks : Screen::Settings;
-      return true;
-    default:
-      if (kbTarget == KbSsid) {
-        if (kbText.isEmpty()) return false;
-        pendingSsid = kbText;
-        openKeyboard(KbWifiPassword, "");  // now the password
-      } else if (kbTarget == KbWifiPassword) {
-        saveWifiCreds(pendingSsid, kbText);
-        screen = Screen::Settings;
-      } else {
-        if (!saveAccountField(kbTarget, kbText)) return false;  // e.g. an address that is not http(s)://
-        screen = Screen::Settings;
-      }
-      return true;
+    case 2: return keyboardFinish(false);
+    default: return keyboardFinish(true);
   }
+}
+
+// ---- Classic T9: a phone keypad where pressing a key repeatedly cycles through its letters (multi-tap) ----------------
+
+constexpr const char* kT9Chars[12] = {".,'-_@/:1", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9", "", " 0", "!?#$%&*()+=;\"~|<>[]{}^`"};
+constexpr const char* kT9Labels[12] = {"1  .,@", "2  abc", "3  def", "4  ghi", "5  jkl", "6  mno", "7  pqrs", "8  tuv", "9  wxyz", "*", "0  space", "#  !?&"};
+constexpr uint32_t kT9RepeatMs = 1100;  // the same key again within this time picks the next letter
+int t9Row = 1, t9Col = 1, t9Mode = 0;   // 0 abc, 1 Abc (next letter capital), 2 ABC
+int t9LastKey = -1, t9Index = 0;
+bool t9Capital = false;
+uint32_t t9LastTap = 0;
+
+static void t9Reset() {
+  t9Row = 1;
+  t9Col = 1;
+  t9Mode = 0;
+  t9LastKey = -1;
+}
+
+static void t9Move(int dr, int dc) {
+  t9LastKey = -1;  // moving away ends the current letter
+  t9Row = constrain(t9Row + dr, 0, 4);
+  t9Col = constrain(t9Col + dc, 0, t9Row == 4 ? 1 : 2);
+}
+
+static bool t9Press() {
+  if (t9Row == 4) return keyboardFinish(t9Col == 1);  // Cancel | Done
+  const int id = t9Row * 3 + t9Col;                   // 0..11 for the keys 1-9, *, 0, #
+  if (id == 9) {                                      // * switches the letter case
+    t9Mode = (t9Mode + 1) % 3;
+    t9LastKey = -1;
+    return false;
+  }
+  const char* chars = kT9Chars[id];
+  const int n = strlen(chars);
+  if (id == t9LastKey && kbText.length() && millis() - t9LastTap < kT9RepeatMs) {
+    t9Index = (t9Index + 1) % n;
+    kbText.remove(kbText.length() - 1);  // replace the previous letter with the next one on this key
+  } else {
+    t9Index = 0;
+    t9Capital = t9Mode != 0;
+    if (t9Mode == 1) t9Mode = 0;
+  }
+  char c = chars[t9Index];
+  if (t9Capital && c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+  kbText += c;
+  t9LastKey = id;
+  t9LastTap = millis();
+  return false;
+}
+
+static void drawT9(bool full) {
+  gfx::clear();
+  static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
+  header(titles[kbTarget]);
+  if (kbTarget == KbWifiPassword) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
+  if (kbTarget == KbServer) gfx::text(kMargin, 66, "e.g. http://192.168.1.4:3000");
+  frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
+  String shown = kbText;
+  while (shown.length() > 1 && gfx::textWidth(shown.c_str()) > gfx::W - 2 * kMargin - 40) shown.remove(0, 1);
+  shown += "_";
+  gfx::text(kMargin + 14, 124, shown.c_str());
+  gfx::text(kMargin, 184, "Press a key again for the next letter");
+  constexpr int kCellW = 144, kCellH = 64, kPitchY = 72, kTop = 230, kLeft = 16;
+  for (int r = 0; r < 4; r++)
+    for (int c = 0; c < 3; c++) {
+      const int id = r * 3 + c, x = kLeft + c * (kCellW + 8), y = kTop + r * kPitchY;
+      const bool sel = r == t9Row && c == t9Col;
+      if (sel) roundRect(x, y, kCellW, kCellH, 8, true); else frame(x, y, kCellW, kCellH, 8);
+      String label = kT9Labels[id];
+      if (id == 9) label = t9Mode == 0 ? "*  abc" : t9Mode == 1 ? "*  Abc" : "*  ABC";
+      else if (t9Mode == 2) label.toUpperCase();
+      gfx::text(x + (kCellW - gfx::textWidth(label.c_str())) / 2, y + 17, label.c_str(), !sel);
+    }
+  const char* labels[2] = {"Cancel", "Done"};
+  for (int k = 0; k < 2; k++) {
+    const int y = kTop + 4 * kPitchY, w = (3 * kCellW + 16) / 2 - 4;
+    const int bx = kLeft + k * (w + 8);
+    const bool sel = t9Row == 4 && t9Col == k;
+    if (sel) roundRect(bx, y, w, kCellH, 8, true); else frame(bx, y, w, kCellH, 8);
+    gfx::text(bx + (w - gfx::textWidth(labels[k])) / 2, y + 17, labels[k], !sel);
+  }
+  drawHints(true, true, true);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
 }
 
 static void networkChosen() {
@@ -1382,6 +1483,7 @@ void setup() {
 #endif
   // The SD card must be mounted before the display driver claims the shared SPI bus.
   const bool sdOk = SdMan.begin();
+  if (sdOk && SdMan.exists(kKeyboardFile)) kbStyle = atoi(SdMan.readFile(kKeyboardFile).c_str()) == 1 ? 1 : 0;
   if (sdOk && SdMan.exists(kSleepFile)) {
     const int m = atoi(SdMan.readFile(kSleepFile).c_str());
     for (int opt : kSleepOptions) if (opt == m) sleepMinutes = m;
@@ -1604,23 +1706,25 @@ void loop() {
     return;
   }
   if (screen == Screen::Keyboard) {
+    const bool t9 = kbStyle == 1;
     if (backClicked()) {  // Back deletes the last character
       if (kbText.length()) kbText.remove(kbText.length() - 1);
+      t9LastKey = -1;
       showList(false);
     } else if (pressed(InputManager::BTN_UP)) {
-      keyboardMove(-1, 0);
+      if (t9) t9Move(-1, 0); else keyboardMove(-1, 0);
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN)) {
-      keyboardMove(1, 0);
+      if (t9) t9Move(1, 0); else keyboardMove(1, 0);
       showList(false);
     } else if (pressed(InputManager::BTN_LEFT)) {
-      keyboardMove(0, -1);
+      if (t9) t9Move(0, -1); else keyboardMove(0, -1);
       showList(false);
     } else if (pressed(InputManager::BTN_RIGHT)) {
-      keyboardMove(0, 1);
+      if (t9) t9Move(0, 1); else keyboardMove(0, 1);
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
-      keyboardPress();
+      if (t9) t9Press(); else keyboardPress();
       showList(false);
     }
     delay(10);
@@ -1660,7 +1764,15 @@ void loop() {
       if (pickerSel < pickerTop) pickerTop = pickerSel;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
-      if (pickerKind == 0) setPet(pickerSel); else setSleep(kSleepOptions[pickerSel]);
+      if (pickerKind == 0) {
+        setPet(pickerSel);
+      } else if (pickerKind == 2) {
+        kbStyle = pickerSel;
+        SdMan.ensureDirectoryExists("/BookOrbit");
+        SdMan.writeFile(kKeyboardFile, String(kbStyle));
+      } else {
+        setSleep(kSleepOptions[pickerSel]);
+      }
       screen = Screen::Settings;
       showList(false);
     }
@@ -1673,7 +1785,7 @@ void loop() {
     } else if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 6) {
+    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 7) {
       settingsSel++;
       showList(false);
     } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
@@ -1691,7 +1803,7 @@ void loop() {
       } else if (settingsSel == 4) {
         openKeyboard(KbPassword, config.password);
       } else {
-        openPicker(settingsSel == 5 ? 0 : 1);
+        openPicker(settingsSel == 5 ? 2 : settingsSel == 6 ? 0 : 1);
         showList(false);
       }
     }
