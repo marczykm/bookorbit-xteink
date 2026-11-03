@@ -768,11 +768,16 @@ static void drawHome(bool full) {
   const int y = kListTop;
   const bool sel = homeSel == 0;
   frame(kMargin, y, gfx::W - 2 * kMargin, kRowHeight - 4, 8, sel);
-  // Book icon: two covers side by side with a spine gap.
-  const int ix = kMargin + 14, iy = y + 16;
-  gfx::fillRect(ix, iy, 40, 36, !sel);
-  gfx::fillRect(ix + 3, iy + 3, 16, 30, sel);
-  gfx::fillRect(ix + 21, iy + 3, 16, 30, sel);
+  // Library icon: books standing on a shelf, one leaning. Ink is white on the highlighted (black) row.
+  const bool ink = !sel;
+  const int ix = kMargin + 14, iy = y + 12, base = iy + 44;  // base = the shelf's top edge
+  gfx::fillRect(ix - 2, base, 46, 3, ink);                      // shelf
+  const int heights[3] = {32, 40, 28};
+  for (int i = 0; i < 3; i++) {                                 // three upright books
+    const int bx = ix + i * 11, bh = heights[i];  // 8 px wide, 3 px apart
+    gfx::fillRect(bx, base - bh, 8, bh, ink);
+  }
+  for (int r = 0; r < 34; r++) gfx::fillRect(ix + 33 + (34 - r) * 7 / 34, base - 1 - r, 8, 1, ink);  // the leaning book
   if (stats.overview) {  // the library overview lives in the menu row
     char counts[64];
     snprintf(counts, sizeof(counts), "%d books, %d authors, %d series", stats.books, stats.authors, stats.series);
