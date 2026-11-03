@@ -230,7 +230,7 @@ Book books[kPageSize];
 int bookCount = 0, bookTotal = 0, page = 0, selected = 0;
 int fastRefreshes = 0;
 // Which screen is showing. Home is the entry point; Library is its only menu item for now.
-enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard } screen = Screen::Home;
+enum class Screen { Home, Library, Settings, Picker, Networks, Keyboard, Confirm } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
@@ -945,13 +945,41 @@ static void saveWifiCreds(const String& ssid, const String& password) {
   startWifi();
 }
 
+// A server address as typed -> the form we store (no trailing slash); empty when it is not a usable http(s):// address.
+static String normalizeServer(String value) {
+  value.trim();
+  while (value.endsWith("/")) value.remove(value.length() - 1);
+  if ((!value.startsWith("http://") && !value.startsWith("https://")) || value.length() < 12) return "";
+  return value;
+}
+
+// Switching to another server removes everything that belongs to the old one: downloaded books (and their reading
+// caches), the queued progress and sessions (their file ids mean nothing on the new server), covers, library list, stats.
+static void clearServerData() {
+  SdMan.removeDir("/BookOrbit/.covers");
+  SdMan.removeDir("/BookOrbit/.library");
+  SdMan.removeDir("/BookOrbit/.cache");
+  SdMan.remove(kStatsFile);
+  SdMan.remove(kOutbox);
+  SdMan.remove(kSessionOutbox);
+  for (const String& name : SdMan.listFiles("/BookOrbit", 500)) {
+    String lower = name;
+    lower.toLowerCase();
+    if (lower.endsWith(".epub") || lower.endsWith(".part")) SdMan.remove((String("/BookOrbit/") + name).c_str());
+  }
+  stats = Stats();
+  bookCount = bookTotal = 0;
+  page = selected = homeSel = 0;
+}
+
+String pendingServer;
+int confirmSel = 0;  // 0 = Cancel, 1 = Switch and clear
+
 // Server address, username and password: stored in /bookorbit.json, then the app signs in again with them.
 static bool saveAccountField(int target, String value) {
   if (target == KbServer) {
-    value.trim();
-    while (value.endsWith("/")) value.remove(value.length() - 1);
-    if (!value.startsWith("http://") && !value.startsWith("https://")) return false;
-    if (value.length() < 12) return false;
+    value = normalizeServer(value);
+    if (value.isEmpty()) return false;
   }
   JsonDocument doc;
   if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
@@ -971,13 +999,7 @@ static bool saveAccountField(int target, String value) {
   serializeJsonPretty(doc, json);
   SdMan.writeFile("/bookorbit.json", json);
   api.configure(config.server, config.insecureTls);
-  if (serverChanged) {  // another server: its books, covers and numbers are different
-    SdMan.removeDir("/BookOrbit/.covers");
-    SdMan.removeDir("/BookOrbit/.library");
-    SdMan.remove(kStatsFile);
-    stats = Stats();
-    bookCount = bookTotal = 0;
-  }
+  if (serverChanged) clearServerData();  // another server: its books, covers and numbers do not apply
   if (!SdMan.exists(kWifiOffFlag)) {  // sign in again in the background
     if (WiFi.getMode() == WIFI_OFF) startWifi();
     net = Net::Connecting;
@@ -1129,8 +1151,18 @@ static bool keyboardFinish(bool done) {
   } else if (kbTarget == KbWifiPassword) {
     saveWifiCreds(pendingSsid, kbText);
     screen = Screen::Settings;
+  } else if (kbTarget == KbServer) {
+    const String value = normalizeServer(kbText);
+    if (value.isEmpty()) return false;  // not an http(s):// address
+    if (value != config.server) {       // a different server: ask before clearing anything
+      pendingServer = value;
+      confirmSel = 0;
+      screen = Screen::Confirm;
+      return true;
+    }
+    screen = Screen::Settings;
   } else {
-    if (!saveAccountField(kbTarget, kbText)) return false;  // e.g. an address that is not http(s)://
+    if (!saveAccountField(kbTarget, kbText)) return false;
     screen = Screen::Settings;
   }
   return true;
@@ -1235,6 +1267,65 @@ static void drawT9(bool full) {
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
 }
 
+// ---- Switching server: confirm, then clear --------------------------------------------------------------------------
+
+// Draws `text` word-wrapped into `w` pixels from (x, y); returns the y below the last line.
+static int wrapText(int x, int y, int w, const String& text) {
+  String line;
+  int start = 0;
+  while (start <= (int)text.length()) {
+    int sp = text.indexOf(' ', start);
+    if (sp < 0) sp = text.length();
+    const String word = text.substring(start, sp);
+    const String tryLine = line.isEmpty() ? word : line + " " + word;
+    if (gfx::textWidth(tryLine.c_str()) > w && !line.isEmpty()) {
+      gfx::text(x, y, line.c_str());
+      y += gfx::lineHeight();
+      line = word;
+    } else {
+      line = tryLine;
+    }
+    start = sp + 1;
+  }
+  if (!line.isEmpty()) {
+    gfx::text(x, y, line.c_str());
+    y += gfx::lineHeight();
+  }
+  return y;
+}
+
+static void drawConfirm(bool full) {
+  gfx::clear();
+  header("Switch server?");
+  int y = 70;
+  gfx::text(kMargin, y, "From");
+  gfx::text(kMargin + 80, y, gfx::ellipsize(config.server.c_str(), gfx::W - 2 * kMargin - 80));
+  y += gfx::lineHeight() + 4;
+  gfx::text(kMargin, y, "To");
+  gfx::text(kMargin + 80, y, gfx::ellipsize(pendingServer.c_str(), gfx::W - 2 * kMargin - 80));
+  y += gfx::lineHeight() + 20;
+  y = wrapText(kMargin, y, gfx::W - 2 * kMargin,
+               "Switching removes everything that came from the old server: downloaded books, covers, statistics and reading "
+               "positions waiting to sync. Books you copied to the card yourself are not touched. After switching, set your "
+               "username and password for the new server.");
+  const char* labels[2] = {"Cancel", "Switch and clear data"};
+  for (int i = 0; i < 2; i++) {
+    const int by = y + 24 + i * 72;
+    const bool sel = i == confirmSel;
+    if (sel) roundRect(kMargin, by, gfx::W - 2 * kMargin, 60, 8, true); else frame(kMargin, by, gfx::W - 2 * kMargin, 60);
+    gfx::text(kMargin + (gfx::W - 2 * kMargin - gfx::textWidth(labels[i])) / 2, by + 15, labels[i], !sel);
+  }
+  drawHints(true, true, false);
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
+}
+
+static void switchServer() {
+  message("Switching server", "Removing the old server's data...\nThis can take a moment.", false);
+  saveAccountField(KbServer, pendingServer);  // stores the address, clears the data and signs in again in the background
+  screen = Screen::Settings;
+  showList(false);
+}
+
 static void networkChosen() {
   if (netSel >= scanCount) {  // other network: type its name first
     pendingSsid = "";
@@ -1258,6 +1349,7 @@ static void drawScreen(bool full) {  // draws whichever screen is current
   else if (screen == Screen::Picker) drawPicker(full);
   else if (screen == Screen::Networks) drawNetworks(full);
   else if (screen == Screen::Keyboard) drawKeyboard(full);
+  else if (screen == Screen::Confirm) drawConfirm(full);
   else drawList(full);
 }
 
@@ -1425,8 +1517,17 @@ static void openReadingNow() {
 static void drawSleepScreen() {
   gfx::loadUiFont();
   gfx::clear(true);  // inverted: white text on black
-  gfx::bigTextCentered(gfx::H / 2 - 60, "BookOrbit", 80, false);
-  gfx::bigTextCentered(gfx::H / 2 + 60, "Zzz...", 28, false);
+  // The companion, asleep, on a white plate (its art is dark on light), enlarged three times.
+  loadPet();
+  constexpr int kScale = 3, kPlate = 64 * kScale + 16, kPlateY = 180;
+  const int plateX = (gfx::W - kPlate) / 2;
+  roundRect(plateX, kPlateY, kPlate, kPlate, 14, false);
+  const uint8_t* sprite = pets::kSprites[petIndex][pets::Sleep];
+  for (int y = 0; y < 64; y++)
+    for (int x = 0; x < 64; x++)
+      if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(plateX + 8 + x * kScale, kPlateY + 8 + y * kScale, kScale, kScale, true);
+  gfx::bigTextCentered(gfx::H / 2 + 40, "BookOrbit", 80, false);
+  gfx::bigTextCentered(gfx::H / 2 + 160, "Zzz...", 28, false);
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
@@ -1716,6 +1817,27 @@ void loop() {
       }
     } else {
       fetchNextCover();  // the Reading now cover
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Confirm) {
+    if (backClicked()) {
+      screen = Screen::Settings;
+      showList(false);
+    } else if (pressed(InputManager::BTN_DOWN) && confirmSel == 0) {
+      confirmSel = 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && confirmSel == 1) {
+      confirmSel = 0;
+      showList(false);
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      if (confirmSel == 1) {
+        switchServer();
+      } else {
+        screen = Screen::Settings;
+        showList(false);
+      }
     }
     delay(10);
     return;
