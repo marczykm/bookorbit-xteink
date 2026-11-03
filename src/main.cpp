@@ -47,7 +47,6 @@ RTC_NOINIT_ATTR long readFileId;  // server file id of the open book, 0 when unk
 
 // Progress made offline waits in this file ("<fileId> <percent>" per line) until the library has Wi-Fi again.
 // Present while the user has switched Wi-Fi off, so the choice survives restarts (opening a book restarts the device).
-constexpr const char* kWifiOffFlag = "/BookOrbit/.wifi_off";
 
 constexpr const char* kOutbox = "/BookOrbit/.progress";
 
@@ -246,12 +245,14 @@ bool halfNext = false;  // the next full draw (a screen change) uses the gentler
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
 constexpr const char* kKeyboardFile = "/BookOrbit/.keyboard";
-int settingsSel = 0;  // Settings list: Wi-Fi on/off, network, server, username, password, companion, sleep timer
+int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer
 int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
-enum class Net { Connecting, Online, Offline } net = Net::Offline;
+enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline = the radio is off, which is the normal idle state
+uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off a few seconds later
+int netDepth = 0;         // requests in flight
 uint32_t netStart = 0;
 String offlineReason;
 
@@ -300,7 +301,6 @@ static void handleSerial() {
         ESP.restart();
       }
       if (line == "SLEEP") goToSleep();
-      if (line == "WIFITOGGLE") { extern void testToggleWifi(); testToggleWifi(); }  // test hook
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
@@ -354,12 +354,14 @@ static void header(const char* title) {
   const int batX = gfx::W - kMargin - 37;
   gfx::batteryIcon(batX, 15, battery.readPercentage(), true);
   // Wi-Fi: strength arcs when online, just the dot while connecting, crossed out when offline.
-  int arcs = net == Net::Offline ? 3 : 0;  // offline: the full icon, crossed out
-  if (net == Net::Online && WiFi.status() == WL_CONNECTED) {
-    const int rssi = WiFi.RSSI();
-    arcs = rssi > -70 ? 3 : rssi > -82 ? 2 : 1;
+  if (net != Net::Offline) {  // the radio is only on while something needs it
+    int arcs = 0;
+    if (net == Net::Online && WiFi.status() == WL_CONNECTED) {
+      const int rssi = WiFi.RSSI();
+      arcs = rssi > -70 ? 3 : rssi > -82 ? 2 : 1;
+    }
+    gfx::wifiIcon(batX - 14 - 26, 13, arcs, false, true, false);
   }
-  gfx::wifiIcon(batX - 14 - 26, 13, arcs, net == Net::Offline, true, net == Net::Offline);
   if (busy) drawBusyDot();
 }
 
@@ -465,8 +467,6 @@ static void drawList(bool full) {
     if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) drawDownloadedIcon(gfx::W - 16 - 14, y + 24 - 2, !sel);  // on the card
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
-  if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
-  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints();
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -740,56 +740,56 @@ static void drawStats(int y) {
   drawPet(kMargin, y, false);  // display only; the companion is chosen in Settings
   y += 86;
   if (stats.streak) {
-    card(kMargin, y, kHalf, 124, "Reading streak");
+    card(kMargin, y, kHalf, 134, "Reading streak");
     snprintf(buf, sizeof(buf), "%d day%s", stats.streakDays, stats.streakDays == 1 ? "" : "s");
     gfx::bigText(kMargin + 10, y + 30, buf, 32);
-    for (int i = 0; i < 7; i++) dot(kMargin + 18 + i * 29, y + 84, 7, stats.week[i]);
+    for (int i = 0; i < 7; i++) dot(kMargin + 18 + i * 29, y + 92, 7, stats.week[i]);
     snprintf(buf, sizeof(buf), "Longest: %d", stats.longest);
-    gfx::text(kMargin + 10, y + 92, buf);
+    gfx::text(kMargin + 10, y + 100, buf);
   }
   if (stats.goal) {
     snprintf(buf, sizeof(buf), "%d goal", stats.goalYear);
-    card(kRight, y, kHalf, 124, buf);
+    card(kRight, y, kHalf, 134, buf);
     if (stats.goalBooks > 0) {
       snprintf(buf, sizeof(buf), "%d / %d", stats.goalDone, stats.goalBooks);
       gfx::bigText(kRight + 10, y + 30, buf, 32);
-      bar(kRight + 10, y + 74, kHalf - 20, 16, (float)stats.goalDone / stats.goalBooks);
-      gfx::text(kRight + 10, y + 92, "books");
+      bar(kRight + 10, y + 82, kHalf - 20, 16, (float)stats.goalDone / stats.goalBooks);
+      gfx::text(kRight + 10, y + 100, "books");
     } else {
       snprintf(buf, sizeof(buf), "%d read", stats.goalDone);
       gfx::bigText(kRight + 10, y + 30, buf, 32);
-      gfx::text(kRight + 10, y + 78, "No goal set");
+      gfx::text(kRight + 10, y + 86, "No goal set");
     }
   }
-  y += 130;
+  y += 140;
   if (stats.rhythm) {
-    card(kMargin, y, kFull, 106, "Reading rhythm");
+    card(kMargin, y, kFull, 120, "Reading rhythm");
     int mx = 1;
     for (int i = 0; i < stats.nDays; i++) mx = max(mx, stats.minutes[i]);
     for (int i = 0; i < stats.nDays; i++) {
-      const int h = max(3, 36 * stats.minutes[i] / mx);
-      roundRect(kMargin + 10 + i * 62, y + 70 - h, 50, h, 3, true);
+      const int h = max(3, 46 * stats.minutes[i] / mx);
+      roundRect(kMargin + 10 + i * 62, y + 82 - h, 50, h, 3, true);
     }
     snprintf(buf, sizeof(buf), "%d min/day, %d%% of days read", stats.avgMin, stats.consistency);
-    gfx::text(kMargin + 10, y + 73, gfx::ellipsize(buf, kFull - 20));
+    gfx::text(kMargin + 10, y + 88, gfx::ellipsize(buf, kFull - 20));
   }
-  y += 112;
+  y += 126;
   if (stats.projection) {
     snprintf(buf, sizeof(buf), "On pace for %d", stats.goalYear);
-    card(kMargin, y, kHalf, 124, stats.goalYear ? buf : "On pace for the year");
+    card(kMargin, y, kHalf, 134, stats.goalYear ? buf : "On pace for the year");
     snprintf(buf, sizeof(buf), "%d books", stats.projBooks);
     gfx::bigText(kMargin + 10, y + 28, buf, 30);
     snprintf(buf, sizeof(buf), "%d done so far", stats.projDone);
-    gfx::text(kMargin + 10, y + 64, buf);
+    gfx::text(kMargin + 10, y + 70, buf);
     snprintf(buf, sizeof(buf), "Trending %s", stats.trend);
-    if (*stats.trend && strcmp(stats.trend, "flat")) gfx::text(kMargin + 10, y + 92, buf);
+    if (*stats.trend && strcmp(stats.trend, "flat")) gfx::text(kMargin + 10, y + 100, buf);
   }
   if (stats.challenge) {
-    card(kRight, y, kHalf, 124, "Monthly challenge");
+    card(kRight, y, kHalf, 134, "Monthly challenge");
     gfx::text(kRight + 10, y + 34, gfx::ellipsize(stats.challengeTitle, kHalf - 20));
-    bar(kRight + 10, y + 72, kHalf - 20, 16, (float)stats.chProgress / stats.chTarget);
+    bar(kRight + 10, y + 80, kHalf - 20, 16, (float)stats.chProgress / stats.chTarget);
     snprintf(buf, sizeof(buf), stats.chDone ? "Completed" : "%d / %d", stats.chProgress, stats.chTarget);
-    gfx::text(kRight + 10, y + 92, buf);
+    gfx::text(kRight + 10, y + 100, buf);
   }
 }
 
@@ -824,8 +824,6 @@ static void drawHome(bool full) {
     label(kMargin + 74, y + 20, "Library", sel);
   }
   drawStats(y + kRowHeight - 4 + 6);
-  if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
-  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints(true, true, false, true);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -834,11 +832,6 @@ static void drawHome(bool full) {
 
 // ---- Settings -------------------------------------------------------------------------------------------------
 
-static const char* wifiValue() {
-  if (net == Net::Online) return "On";
-  if (net == Net::Connecting) return "Connecting...";
-  return SdMan.exists(kWifiOffFlag) ? "Off" : "Not connected";
-}
 
 static void setSleep(int minutes) {
   sleepMinutes = minutes;
@@ -850,15 +843,15 @@ static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
   // Rows are grouped under section headings; settingsSel counts rows only.
-  const char* sectionOf[8] = {"Wi-Fi", nullptr, "Account", nullptr, nullptr, "Device", nullptr, nullptr};  // heading above the row
-  const char* names[8] = {"WiFi radio", "Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
+  const char* sectionOf[7] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr};  // heading above the row
+  const char* names[7] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
   String sleepText = String(sleepMinutes) + " min";
   String stars;
   for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
-  const String values[8] = {wifiValue(), config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText};
+  const String values[7] = {config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText};
   constexpr int kRowH = 52, kRowPitch = 58, kHeadingH = 34;
   int y = 60;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 7; i++) {
     if (sectionOf[i]) {  // a heading: the name in capitals, then a rule to the edge
       String h = sectionOf[i];
       h.toUpperCase();
@@ -958,7 +951,6 @@ int kbRow = 1, kbCol = 0;
 
 // Joins the saved network again (used after the credentials change or a scan).
 static void startWifi() {
-  SdMan.remove(kWifiOffFlag);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
@@ -1036,11 +1028,9 @@ static bool saveAccountField(int target, String value) {
   SdMan.writeFile("/bookorbit.json", json);
   api.configure(config.server, config.insecureTls);
   if (serverChanged) clearServerData();  // another server: its books and numbers do not apply
-  if (!SdMan.exists(kWifiOffFlag)) {  // sign in again in the background
-    if (WiFi.getMode() == WIFI_OFF) startWifi();
-    net = Net::Connecting;
-    netStart = millis();
-  }
+  if (WiFi.getMode() == WIFI_OFF) startWifi();  // sign in again in the background
+  net = Net::Connecting;
+  netStart = millis();
   return true;
 }
 
@@ -1071,8 +1061,15 @@ static void scanForNetworks() {
   if (wasOff) WiFi.mode(WIFI_OFF);
 }
 
+static void syncModal(const char* title, const String& body);
+static void waitForKey();
+
 static void openNetworks() {
   scanForNetworks();
+  if (scanCount == 0) {  // tell the user, then still offer "Other network..." for a hidden one
+    syncModal("No networks found", "Press any button");
+    waitForKey();
+  }
   netSel = 0;
   netTop = 0;
   screen = Screen::Networks;
@@ -1098,7 +1095,6 @@ static void drawNetworks(bool full) {
       gfx::text(kMargin + 14, y + 16, "Other network...", !sel);
     }
   }
-  if (scanCount == 0) gfx::text(kMargin, gfx::H - 130, "No networks found.");
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
 }
@@ -1395,7 +1391,6 @@ static void drawBrowse(bool full) {
     label(kMargin + 4, y + 4, names[i], sel);
     label(kMargin + 4, y + 4 + gfx::lineHeight() - 2, sub, sel);
   }
-  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -1419,7 +1414,6 @@ static void drawEntities(bool full) {
     label(kMargin + 4, y + 4 + gfx::lineHeight() - 2, sub, sel);
   }
   if (entCount == 0) gfx::text(kMargin, 120, "Nothing here");
-  if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints(true, true, true);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
   firstDraw = false;
@@ -1455,13 +1449,20 @@ static void pumpDisplay() {
 
 static bool connectWifi(String& error) {
   WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
+  WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
   WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
   const uint32_t start = millis();
+  uint32_t lastBegin = start;
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - start > 20000) {
       error = "Could not join Wi-Fi \"" + config.ssid + "\"";
       return false;
+    }
+    if (millis() - lastBegin > 7000) {  // a join that hangs often works when started again
+      WiFi.disconnect();
+      delay(100);
+      WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
+      lastBegin = millis();
     }
     delay(200);
   }
@@ -1470,6 +1471,58 @@ static bool connectWifi(String& error) {
 
 static bool ensureWifi(String& error) {
   return WiFi.status() == WL_CONNECTED || connectWifi(error);
+}
+
+static void syncModal(const char* title, const String& body);
+static void backgroundSync();
+
+static void goOffline() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(150);  // let the driver finish stopping before anything starts it again
+  net = Net::Offline;
+  Serial.println("wifi off");
+}
+
+// Brings Wi-Fi up (and signs in) for whoever needs the server right now; it goes off again by itself a few seconds after the
+// last request (see netIdle). Waits for the background connection when one is already under way.
+static bool goOnline(String& error, bool announce = true) {
+  if (net == Net::Online && WiFi.status() == WL_CONNECTED) {
+    lastNetUse = millis();
+    return true;
+  }
+  if (announce) syncModal("Connecting", "Wi-Fi: " + config.ssid);
+  if (net == Net::Connecting) {
+    const uint32_t t0 = millis();
+    while (net == Net::Connecting && millis() - t0 < 25000) {
+      backgroundSync();
+      delay(50);
+    }
+    if (net == Net::Online) return true;
+    error = offlineReason.length() ? offlineReason : String("Could not connect");
+    return false;
+  }
+  if (!connectWifi(error)) {
+    goOffline();
+    return false;
+  }
+  configTime(0, 0, "pool.ntp.org", "time.google.com");  // wall-clock time for reading sessions
+  if (!api.login(config.username, config.password, error)) {
+    goOffline();
+    return false;
+  }
+  flushProgress();
+  flushSessions();
+  net = Net::Online;
+  lastNetUse = millis();
+  return true;
+}
+
+// Switches the radio off once nothing has used the server for a few seconds.
+static void netIdle() {
+  if (net != Net::Online || netDepth > 0 || millis() - lastNetUse < 6000) return;
+  goOffline();
+  showList(false);
 }
 
 // The library list is cached per page on the SD card so it can be browsed without a connection.
@@ -1515,33 +1568,28 @@ static bool loadCachedPage(int p) {
 }
 
 static bool loadPage(int newPage, String& error) {
-  if (net == Net::Online) {
-    String netError;
+  if (net != Net::Online && loadCachedPage(newPage)) return true;  // radio off: the cached page is enough
+  String netError;
+  if (goOnline(netError)) {
     int total = 0;
-    if (ensureWifi(netError)) {
-      const int n = api.listBooks(newPage, kPageSize, books, kPageSize, total, netError, src, srcId);
-      if (n >= 0) {
-        bookCount = n;
-        bookTotal = total;
-        page = newPage;
-        selected = 0;
-        saveCachedPage(newPage);
-        return true;
-      }
+    const int n = api.listBooks(newPage, kPageSize, books, kPageSize, total, netError, src, srcId);
+    if (n >= 0) {
+      bookCount = n;
+      bookTotal = total;
+      page = newPage;
+      selected = 0;
+      saveCachedPage(newPage);
+      return true;
     }
-    Serial.printf("library page %d: %s\n", newPage, netError.c_str());
-    if (!loadCachedPage(newPage)) {
-      error = netError;
-      return false;
-    }
-    // Only a lost connection puts the app offline; a one-off bad response just shows the cached page this time.
-    if (WiFi.status() != WL_CONNECTED || netError.startsWith("Cannot reach")) net = Net::Offline;
-    offlineReason = netError;
-    return true;
+    if (WiFi.status() != WL_CONNECTED) goOffline();
   }
-  if (loadCachedPage(newPage)) return true;
-  error = "This page is not cached.\nHold Back to connect.";
-  return false;
+  Serial.printf("library page %d: %s\n", newPage, netError.c_str());
+  if (!loadCachedPage(newPage)) {
+    error = netError;
+    return false;
+  }
+  offlineReason = netError;
+  return true;
 }
 
 static String entityCachePath(Scope kind, int p) { return "/BookOrbit/.library/e" + String((int)kind) + "-" + String(p) + ".json"; }
@@ -1570,40 +1618,37 @@ static bool loadCachedEntities(Scope kind, int p) {
 
 // One page of authors / series / smart scopes, from the server when online (and cached), else from the cache.
 static bool loadEntities(Scope kind, int p, String& error) {
-  if (net == Net::Online) {
-    String netError;
+  if (net != Net::Online && loadCachedEntities(kind, p)) return true;  // radio off: the cached list is enough
+  String netError;
+  if (goOnline(netError)) {
     int total = 0;
-    if (ensureWifi(netError)) {
-      const int n = api.listEntities(kind, p, kPageSize, entities, kPageSize, total, netError);
-      if (n >= 0) {
-        entCount = n;
-        entTotal = total;
-        entKind = kind;
-        entLoaded = kind;
-        entPage = p;
-        entSel = 0;
-        JsonDocument doc;
-        doc["total"] = total;
-        for (int i = 0; i < n; i++) {
-          doc["items"][i]["id"] = entities[i].id;
-          doc["items"][i]["name"] = entities[i].name;
-          doc["items"][i]["count"] = entities[i].count;
-        }
-        String json;
-        serializeJson(doc, json);
-        SdMan.ensureDirectoryExists("/BookOrbit");
-        SdMan.ensureDirectoryExists("/BookOrbit/.library");
-        SdMan.writeFile(entityCachePath(kind, p).c_str(), json);
-        return true;
+    const int n = api.listEntities(kind, p, kPageSize, entities, kPageSize, total, netError);
+    if (n >= 0) {
+      entCount = n;
+      entTotal = total;
+      entKind = kind;
+      entLoaded = kind;
+      entPage = p;
+      entSel = 0;
+      JsonDocument doc;
+      doc["total"] = total;
+      for (int i = 0; i < n; i++) {
+        doc["items"][i]["id"] = entities[i].id;
+        doc["items"][i]["name"] = entities[i].name;
+        doc["items"][i]["count"] = entities[i].count;
       }
+      String json;
+      serializeJson(doc, json);
+      SdMan.ensureDirectoryExists("/BookOrbit");
+      SdMan.ensureDirectoryExists("/BookOrbit/.library");
+      SdMan.writeFile(entityCachePath(kind, p).c_str(), json);
+      return true;
     }
-    Serial.printf("browse %d page %d: %s\n", (int)kind, p, netError.c_str());
-    if (loadCachedEntities(kind, p)) return true;
-    error = netError;
-    return false;
+    if (WiFi.status() != WL_CONNECTED) goOffline();
   }
+  Serial.printf("browse %d page %d: %s\n", (int)kind, p, netError.c_str());
   if (loadCachedEntities(kind, p)) return true;
-  error = "This list is not cached.\nHold Back to connect.";
+  error = netError;
   return false;
 }
 
@@ -1632,16 +1677,10 @@ void testSyncModal() { syncModal("In sync", "Server position: 12%"); }  // test 
 // Opens the selected book, downloading it first when it isn't on the SD card yet.
 static void openBook(const Book& b) {
   String path = BookOrbit::pathFor(b), error;
-  if (net != Net::Online && !SdMan.exists(path.c_str())) {
-    message("Not downloaded", net == Net::Connecting ? "This book is not on the SD card.\nStill connecting, try again\nin a moment.\n\nPress any button" : "This book is not on the SD card.\nHold Back in the list to connect.\n\nPress any button", false);
-    waitForKey();
-    showList(false);
-    return;
-  }
   if (!SdMan.exists(path.c_str())) {
     busy = true;  // shown by the "Downloading" screen
     message("Downloading", String(gfx::ellipsize(b.title, 440)) + "\nPlease wait...", false);
-    if (!ensureWifi(error) || !api.download(b, path, error, downloadProgress)) {
+    if (!goOnline(error, false) || !api.download(b, path, error, downloadProgress)) {
       busy = false;
       message("Download failed", error + "\n\nPress any button", false);
       Serial.printf("download failed: %s\n", error.c_str());
@@ -1657,17 +1696,11 @@ static void openBook(const Book& b) {
   strlcpy(openScopeName, srcName, sizeof(openScopeName));
   readFileId = b.fileId;
   readServerPercent = -1;
-  if (b.fileId && net != Net::Offline) {
-    syncModal("Syncing", "Signing in...");
-    const uint32_t t0 = millis();
-    while (net == Net::Connecting && millis() - t0 < 25000) {  // still signing in: wait, so the server's position isn't missed
-      backgroundSync();
-      delay(50);
-    }
-    if (net == Net::Online) {
+  if (b.fileId) {  // the server's position: bring Wi-Fi up for it (it is switched off again by the restart below)
+    if (goOnline(error)) {
       syncModal("Syncing", "Checking your reading position...");
       float serverPct;
-      if (ensureWifi(error) && api.getProgress(b.fileId, serverPct, error)) {
+      if (api.getProgress(b.fileId, serverPct, error)) {
         readServerPercent = serverPct;
         char line[48];
         snprintf(line, sizeof(line), "Server position: %.0f%%", serverPct);
@@ -1979,10 +2012,10 @@ void setup() {
   if (!config.load(error)) fatal("Setup needed", error + "\nSee config.example.json");
 
   BookOrbit::setActivityHook([](bool active) {  // free the refresh shadow while the radio moves data
-    static int depth = 0;
+    lastNetUse = millis();
     if (active) {
-      if (depth++ == 0) gfx::setLowMemory(true);
-    } else if (depth > 0 && --depth == 0) {
+      if (netDepth++ == 0) gfx::setLowMemory(true);
+    } else if (netDepth > 0 && --netDepth == 0) {
       gfx::setLowMemory(false);
     }
   });
@@ -1992,12 +2025,6 @@ void setup() {
     tzset();
   }
   if (loadCachedPage(0)) {  // show the library right away and connect in the background
-    if (SdMan.exists(kWifiOffFlag)) {  // the user turned Wi-Fi off: stay offline until they turn it on
-      net = Net::Offline;
-      Serial.printf("library: %d books (cached, Wi-Fi off)\n", bookCount);
-      showList(true);
-      return;
-    }
     net = Net::Connecting;
     netStart = millis();
     WiFi.mode(WIFI_STA);
@@ -2035,7 +2062,7 @@ static void backgroundSync() {
   String error;
   if (WiFi.status() != WL_CONNECTED) {
     if (millis() - netStart > 20000) {
-      net = Net::Offline;
+      goOffline();
       offlineReason = "Could not join Wi-Fi \"" + config.ssid + "\"";
       Serial.printf("offline: %s\n", offlineReason.c_str());
       showList(false);
@@ -2054,10 +2081,11 @@ static void backgroundSync() {
     if (loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
-    net = Net::Offline;
+    goOffline();
     offlineReason = error;
     Serial.printf("offline: %s\n", error.c_str());
   }
+  lastNetUse = millis();
   busy = false;
   showList(false);
 }
@@ -2082,47 +2110,11 @@ static void fetchReadingCover() {
   }
 }
 
-// Holding Back switches Wi-Fi off (library stays usable from the cache) or back on.
-static void toggleWifi() {
-  if (net == Net::Offline) {
-    net = Net::Connecting;
-    netStart = millis();
-    SdMan.remove(kWifiOffFlag);
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
-    WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
-    Serial.println("wifi on");
-  } else {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    net = Net::Offline;
-    SdMan.ensureDirectoryExists("/BookOrbit");
-    SdMan.writeFile(kWifiOffFlag, "1");
-    Serial.println("wifi off");
-  }
-  showList(false);
-}
-
-void testToggleWifi() { toggleWifi(); }
-
-// True once per short click of Back (on release, unless the press turned out to be a hold).
-static bool holdFired = false;
+// True once per click of Back (on release).
 static bool backClicked() {
   if (injected == InputManager::BTN_BACK) { injected = -1; return true; }  // test hook
   if (!backReleased) return false;
   backReleased = false;
-  const bool wasHold = holdFired;
-  holdFired = false;
-  return !wasHold;
-}
-
-// True once per press, when Back has been held for 800 ms.
-static bool backHeld() {
-  static bool handled = false;
-  if (!input.isPressed(InputManager::BTN_BACK)) { handled = false; return false; }
-  if (handled || input.getHeldTime() < 800) return false;
-  handled = true;
-  holdFired = true;
   return true;
 }
 
@@ -2147,10 +2139,9 @@ void loop() {
   }
   pumpDisplay();
   backgroundSync();
+  netIdle();
   if (screen == Screen::Home) {
-    if (backHeld()) {
-      toggleWifi();
-    } else if (pressed(InputManager::BTN_RIGHT)) {
+    if (pressed(InputManager::BTN_RIGHT)) {
       screen = Screen::Settings;
       settingsSel = 0;
       showList(false);
@@ -2222,7 +2213,7 @@ void loop() {
   if (screen == Screen::Networks) {
     if (backClicked()) {  // leave: rejoin the saved network that the scan may have interrupted
       screen = Screen::Settings;
-      if (net != Net::Online && !SdMan.exists(kWifiOffFlag)) startWifi();
+      if (net != Net::Offline) startWifi();
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && netSel < scanCount) {
       netSel++;
@@ -2239,9 +2230,7 @@ void loop() {
     return;
   }
   if (screen == Screen::Picker) {
-    if (backHeld()) {
-      toggleWifi();
-    } else if (backClicked()) {  // leave without changing anything
+    if (backClicked()) {  // leave without changing anything
       screen = Screen::Settings;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && pickerSel < pickerCount() - 1) {
@@ -2269,12 +2258,10 @@ void loop() {
     return;
   }
   if (screen == Screen::Settings) {
-    if (backHeld()) {
-      toggleWifi();
-    } else if (backClicked()) {
+    if (backClicked()) {
       screen = Screen::Home;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 7) {
+    } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 6) {
       settingsSel++;
       showList(false);
     } else if (pressed(InputManager::BTN_UP) && settingsSel > 0) {
@@ -2282,17 +2269,15 @@ void loop() {
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (settingsSel == 0) {
-        toggleWifi();  // redraws by itself
-      } else if (settingsSel == 1) {
         openNetworks();
-      } else if (settingsSel == 2) {
+      } else if (settingsSel == 1) {
         openKeyboard(KbServer, config.server.isEmpty() ? String("http://") : config.server);
-      } else if (settingsSel == 3) {
+      } else if (settingsSel == 2) {
         openKeyboard(KbUsername, config.username);
-      } else if (settingsSel == 4) {
+      } else if (settingsSel == 3) {
         openKeyboard(KbPassword, config.password);
       } else {
-        openPicker(settingsSel == 5 ? 2 : settingsSel == 6 ? 0 : 1);
+        openPicker(settingsSel == 4 ? 2 : settingsSel == 5 ? 0 : 1);
         showList(false);
       }
     }
@@ -2300,9 +2285,7 @@ void loop() {
     return;
   }
   if (screen == Screen::Browse) {
-    if (backHeld()) {
-      toggleWifi();
-    } else if (backClicked()) {
+    if (backClicked()) {
       screen = Screen::Home;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && browseSel < 3) {
@@ -2333,9 +2316,7 @@ void loop() {
   }
   if (screen == Screen::Entities) {
     String error;
-    if (backHeld()) {
-      toggleWifi();
-    } else if (backClicked()) {
+    if (backClicked()) {
       screen = Screen::Browse;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && entSel + 1 < entCount) {
@@ -2373,9 +2354,7 @@ void loop() {
     return;
   }
   String error;
-  if (backHeld()) {
-    toggleWifi();
-  } else if (pressed(InputManager::BTN_DOWN) && selected + 1 < bookCount) {
+  if (pressed(InputManager::BTN_DOWN) && selected + 1 < bookCount) {
     selected++;
     showList(false);
   } else if (pressed(InputManager::BTN_UP) && selected > 0) {
