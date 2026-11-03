@@ -162,6 +162,51 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
   return n;
 }
 
+bool BookOrbit::fetchThumbnailOnce(long bookId, const String& path, String& error) {
+  Conn client;
+  HTTPClient http;
+  if (!begin(http, client, server_ + "/api/v1/books/" + String(bookId) + "/thumbnail", token_, error)) return false;
+  const int code = http.GET();
+  if (code != 200) {
+    error = errorFor(code);
+    http.end();
+    return false;
+  }
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.ensureDirectoryExists("/BookOrbit/.covers");
+  SdMan.remove(path.c_str());
+  FsFile file = SdMan.open(path.c_str(), O_WRITE | O_CREAT | O_TRUNC);
+  if (!file) {
+    error = "Cannot write to SD card";
+    http.end();
+    return false;
+  }
+  size_t done = 0;
+  uint8_t buf[1024];
+  Stream& in = http.getStream();
+  uint32_t lastData = millis();
+  while ((http.connected() || in.available()) && millis() - lastData < kTimeoutMs) {
+    const int avail = in.available();
+    if (avail > 0) {
+      const int n = in.readBytes(buf, min<size_t>(avail, sizeof(buf)));
+      if (n > 0 && file.write(buf, n) != (size_t)n) break;
+      done += n;
+      lastData = millis();
+      if (done > 1024 * 1024) break;  // a thumbnail this big is not a thumbnail
+    } else {
+      delay(5);
+    }
+  }
+  file.close();
+  http.end();
+  if (done == 0) {
+    SdMan.remove(path.c_str());
+    error = "Empty thumbnail";
+    return false;
+  }
+  return true;
+}
+
 bool BookOrbit::postSessionOnce(long fileId, const String& body, bool& rejected, String& error) {
   Conn client;
   HTTPClient http;
@@ -294,6 +339,12 @@ int BookOrbit::listBooks(int page, int pageSize, Book* out, int max, int& total,
   int n = listBooksOnce(page, pageSize, out, max, total, error);
   if (n < 0 && unauthorized(error) && refresh()) n = listBooksOnce(page, pageSize, out, max, total, error);
   return n;
+}
+
+bool BookOrbit::fetchThumbnail(long bookId, const String& path, String& error) {
+  bool ok = fetchThumbnailOnce(bookId, path, error);
+  if (!ok && unauthorized(error) && refresh()) ok = fetchThumbnailOnce(bookId, path, error);
+  return ok;
 }
 
 bool BookOrbit::postSession(long fileId, const String& body, bool& rejected, String& error) {

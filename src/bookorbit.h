@@ -23,6 +23,8 @@ class BookOrbit {
   bool postSession(long fileId, const String& body, bool& rejected, String& error);
   // Reads the saved reading progress (0-100) of a book file.
   bool getProgress(long fileId, float& percentage, String& error);
+  // Saves a book's cover thumbnail (whatever image format the server sends) to `path`.
+  bool fetchThumbnail(long bookId, const String& path, String& error);
   // Where download() stores the book on the SD card.
   static String pathFor(const Book& book);
   // Saves the book's EPUB under /BookOrbit/ and returns its SD path in `path`.
@@ -30,6 +32,7 @@ class BookOrbit {
 
  private:
   int listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error);
+  bool fetchThumbnailOnce(long bookId, const String& path, String& error);
   bool postSessionOnce(long fileId, const String& body, bool& rejected, String& error);
   bool postProgressOnce(long fileId, float percentage, String& error);
   bool getProgressOnce(long fileId, float& percentage, String& error);

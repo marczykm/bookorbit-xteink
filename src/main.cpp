@@ -10,6 +10,7 @@
 
 #include "bookorbit.h"
 #include "config.h"
+#include "cover.h"
 #include "gfx.h"
 #include "reader.h"
 #include <ArduinoJson.h>
@@ -213,9 +214,9 @@ static void flushSessions() {
   if (left.isEmpty()) SdMan.remove(kSessionOutbox); else SdMan.writeFile(kSessionOutbox, left);
 }
 
-constexpr int kPageSize = 10;
+constexpr int kPageSize = 8;
 constexpr int kMargin = 16;
-constexpr int kRowHeight = 68;
+constexpr int kRowHeight = 80;
 constexpr int kListTop = 64;
 
 Book books[kPageSize];
@@ -252,6 +253,7 @@ static void handleSerial() {
       }
       if (line == "SLEEP") goToSleep();
       if (line == "WIFITOGGLE") { extern void testToggleWifi(); testToggleWifi(); }  // test hook
+      if (line == "CLEARCOVERS") { SdMan.removeDir("/BookOrbit/.covers"); ESP.restart(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
       if (line.startsWith("CFG:")) {
@@ -375,9 +377,16 @@ static void drawList(bool full) {
     const int y = kListTop + i * kRowHeight;
     const bool sel = i == selected;
     if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
-    gfx::text(kMargin, y + 2, gfx::ellipsize(books[i].title, gfx::W - 2 * kMargin), !sel);
-    gfx::text(kMargin, y + 2 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, gfx::W - 2 * kMargin), !sel);
-    if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) gfx::fillRect(gfx::W - 24, y + 20, 12, 12, !sel);  // downloaded
+    // Cover: a white plate with a frame (so it also shows on the black selection band), then the cached 1-bit image.
+    gfx::fillRect(kMargin, y + 1, cover::W + 2, cover::H + 2, false);
+    gfx::fillRect(kMargin, y + 1, cover::W + 2, cover::H + 2, true);
+    gfx::fillRect(kMargin + 1, y + 2, cover::W, cover::H, false);
+    uint8_t bits[cover::kBytes];
+    if (books[i].id && cover::load(books[i].id, bits)) gfx::blit1bit(kMargin + 1, y + 2, bits, cover::W, cover::H);
+    const int textX = kMargin + cover::W + 2 + 14, textW = gfx::W - textX - 34;
+    gfx::text(textX, y + 8, gfx::ellipsize(books[i].title, textW), !sel);
+    gfx::text(textX, y + 8 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), !sel);
+    if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) gfx::fillRect(gfx::W - 24, y + 28, 12, 12, !sel);  // downloaded
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
   if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
@@ -417,7 +426,7 @@ static bool ensureWifi(String& error) {
 }
 
 // The library list is cached per page on the SD card so it can be browsed without a connection.
-static String cachePath(int p) { return "/BookOrbit/.library/p" + String(p) + ".json"; }
+static String cachePath(int p) { return "/BookOrbit/.library/8-" + String(p) + ".json"; }
 
 static void saveCachedPage(int p) {
   JsonDocument doc;
@@ -697,6 +706,31 @@ static void backgroundSync() {
   showList(false);
 }
 
+// Downloads one missing cover of the visible page per call (so buttons stay responsive), then redraws once when none are left.
+static void fetchNextCover() {
+  static bool dirty = false;
+  static uint32_t retryAfter = 0;
+  if (net != Net::Online || millis() < retryAfter) return;
+  for (int i = 0; i < bookCount; i++) {
+    const long id = books[i].id;
+    if (!id || cover::cached(id)) continue;
+    String error;
+    if (api.fetchThumbnail(id, cover::stagingPath(), error) && cover::convertStaged(id, error)) {
+      Serial.printf("cover %ld cached\n", id);
+      dirty = true;
+    } else {
+      Serial.printf("cover %ld failed: %s\n", id, error.c_str());
+      if (error.indexOf("404") >= 0) cover::markNone(id);  // the book has no cover
+      else retryAfter = millis() + 30000;                   // network trouble: try again later
+    }
+    return;
+  }
+  if (dirty) {
+    dirty = false;
+    showList(false);
+  }
+}
+
 // Holding Back switches Wi-Fi off (library stays usable from the cache) or back on.
 static void toggleWifi() {
   if (net == Net::Offline) {
@@ -767,5 +801,6 @@ void loop() {
     busy = false;
     if (ok) showList(true); else message("Error", error + "\n\nPress any button");
   }
+  else fetchNextCover();  // idle: fetch covers one at a time
   delay(10);
 }

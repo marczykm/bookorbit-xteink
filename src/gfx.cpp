@@ -84,6 +84,12 @@ bool loadUiFont() {
 
 void clear(bool black) { memset(disp->getFrameBuffer(), black ? 0x00 : 0xFF, disp->getBufferSize()); }
 
+void blit1bit(int x, int y, const uint8_t* bits, int w, int h) {
+  const int stride = (w + 7) / 8;
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++) setPixel(x + i, y + j, bits[j * stride + i / 8] & (0x80 >> (i & 7)));
+}
+
 void fillRect(int x, int y, int w, int h, bool black) {
   for (int j = 0; j < h; j++)
     for (int i = 0; i < w; i++) setPixel(x + i, y + j, black);

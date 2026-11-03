@@ -12,6 +12,8 @@ void begin(EInkDisplay* display);
 // Switches text to Noto Serif from the flash font pack (Polish letters); keeps the ASCII bitmap font on failure.
 bool loadUiFont();
 void clear(bool black = false);  // white page, or a black one
+// Draws a 1-bit image (MSB first, 1 = black pixel) with its top-left at (x, y).
+void blit1bit(int x, int y, const uint8_t* bits, int w, int h);
 void fillRect(int x, int y, int w, int h, bool black);
 void text(int x, int y, const char* utf8, bool black = true);  // y = top of the line
 int textWidth(const char* utf8);
