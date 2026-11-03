@@ -1516,18 +1516,17 @@ static void openReadingNow() {
 
 static void drawSleepScreen() {
   gfx::loadUiFont();
-  gfx::clear(true);  // inverted: white text on black
-  // The companion, asleep, on a white plate (its art is dark on light), enlarged three times.
+  gfx::clear();  // light page, dark text
+  // The companion, asleep, enlarged three times.
   loadPet();
-  constexpr int kScale = 3, kPlate = 64 * kScale + 16, kPlateY = 180;
-  const int plateX = (gfx::W - kPlate) / 2;
-  roundRect(plateX, kPlateY, kPlate, kPlate, 14, false);
+  constexpr int kScale = 3, kSize = 64 * kScale, kPetY = 188;
+  const int petX = (gfx::W - kSize) / 2;
   const uint8_t* sprite = pets::kSprites[petIndex][pets::Sleep];
   for (int y = 0; y < 64; y++)
     for (int x = 0; x < 64; x++)
-      if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(plateX + 8 + x * kScale, kPlateY + 8 + y * kScale, kScale, kScale, true);
-  gfx::bigTextCentered(gfx::H / 2 + 40, "BookOrbit", 80, false);
-  gfx::bigTextCentered(gfx::H / 2 + 160, "Zzz...", 28, false);
+      if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, kPetY + y * kScale, kScale, kScale, true);
+  gfx::bigTextCentered(gfx::H / 2 + 40, "BookOrbit", 80);
+  gfx::bigTextCentered(gfx::H / 2 + 160, "Zzz...", 28);
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
