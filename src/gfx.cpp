@@ -234,3 +234,26 @@ void dumpFramebuffer() {
   Serial.println("\nFB-END");
 }
 }  // namespace gfx
+
+namespace gfx {
+namespace {
+void roundRect(int x, int y, int w, int h, int r, bool black) {
+  for (int j = 0; j < h; j++) {
+    const int fromEdge = j < r ? r - j : (j >= h - r ? j - (h - r) + 1 : 0);
+    int inset = 0;
+    if (fromEdge > 0) inset = r - (int)sqrtf((float)(r * r - (fromEdge - 0.5f) * (fromEdge - 0.5f)));
+    fillRect(x + inset, y + j, w - 2 * inset, 1, black);
+  }
+}
+}  // namespace
+
+void modal(const char* title, const char* body) {
+  waitIdle();
+  const int w = 300, h = 80, x = (W - w) / 2, y = 330, r = 10;
+  roundRect(x, y, w, h, r, true);
+  roundRect(x + 2, y + 2, w - 4, h - 4, r - 2, false);
+  bigTextCentered(y + 10, title, 22);
+  bigTextCentered(y + 44, ellipsize(body, w - 24), 17);
+  flush(EInkDisplay::FAST_REFRESH);
+}
+}  // namespace gfx

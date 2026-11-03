@@ -1622,14 +1622,7 @@ static void waitForKey() {
 }
 
 // A framed box over whatever is on screen, for short status notices.
-static void syncModal(const char* title, const String& body) {
-  gfx::waitIdle();
-  const int w = 340, h = 100, x = (gfx::W - w) / 2, y = 320;
-  frame(x, y, w, h, 12);
-  gfx::bigTextCentered(y + 12, title, 28);
-  gfx::bigTextCentered(y + 56, gfx::ellipsize(body.c_str(), w - 32), 20);
-  gfx::flush(EInkDisplay::FAST_REFRESH);
-}
+static void syncModal(const char* title, const String& body) { gfx::modal(title, body.c_str()); }
 
 static void backgroundSync();
 
@@ -1743,6 +1736,8 @@ static void drawSleepScreen() {
 }
 
 static void closeBook() {
+  reader::uiFont(true);  // the reader's own face draws the modal (the UI font isn't loaded while reading)
+  syncModal("Closing book", "Saving your position...");
   sessionTick();
   checkpoint();
   reader::close();
@@ -1757,36 +1752,36 @@ static int readerMenuSel = 0, tocTop = 0;
 static int mainItems[2], mainCount = 0;  // 0 = Contents, 1 = Text size
 
 static void drawMenuBox(const char* title, int rows, int h, int& x, int& y, int& w) {
-  w = 280;
+  w = 230;
   x = (gfx::W - w) / 2;
-  y = 220;
+  y = 250;
   gfx::waitIdle();
   frame(x, y, w, h, 12);
-  gfx::text(x + 20, y + 8, title);
-  gfx::fillRect(x + 10, y + 42, w - 20, 2, true);
+  gfx::bigText(x + 18, y + 8, title, 18);
+  gfx::fillRect(x + 10, y + 34, w - 20, 2, true);
 }
 
 static void drawReaderMenu() {
-  constexpr int rowH = 40;
+  constexpr int rowH = 34;
   int x, y, w;
   if (readerMenu == RMenu::Main) {
-    drawMenuBox("Menu", mainCount, 54 + mainCount * rowH, x, y, w);
+    drawMenuBox("Menu", mainCount, 50 + mainCount * rowH, x, y, w);
     for (int i = 0; i < mainCount; i++) {
-      const int ry = y + 48 + i * rowH;
+      const int ry = y + 40 + i * rowH;
       const bool sel = i == readerMenuSel;
       if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
-      gfx::text(x + 24, ry + 4, mainItems[i] == 0 ? "Contents" : "Text size", !sel);
+      gfx::bigText(x + 22, ry + 4, mainItems[i] == 0 ? "Contents" : "Text size", 18, !sel);
     }
   } else if (readerMenu == RMenu::Size) {
     constexpr int n = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
-    drawMenuBox("Text size", n, 54 + n * rowH, x, y, w);
+    drawMenuBox("Text size", n, 50 + n * rowH, x, y, w);
     for (int i = 0; i < n; i++) {
-      const int ry = y + 48 + i * rowH;
+      const int ry = y + 40 + i * rowH;
       const bool sel = i == readerMenuSel;
       if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
       char row[24];
       snprintf(row, sizeof(row), "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
-      gfx::text(x + 24, ry + 4, row, !sel);
+      gfx::bigText(x + 22, ry + 4, row, 18, !sel);
     }
   } else if (readerMenu == RMenu::Toc) {
     constexpr int visible = 14, rh = 48;

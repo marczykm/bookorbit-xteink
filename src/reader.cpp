@@ -234,10 +234,9 @@ bool loadFonts(State& s) {
 }
 
 void showBusy(const char* what) {
-  gfx::fillRect(0, gfx::H / 2 - 40, gfx::W, 80, true);
-  const int w = gfx::textWidth(what);
-  gfx::text((gfx::W - w) / 2, gfx::H / 2 - gfx::lineHeight() / 2, what, false);
-  gfx::flush(EInkDisplay::FAST_REFRESH);
+  gfx::lendFace(st && st->ttf ? &st->faces[0] : nullptr);  // the book's face has the Polish letters; the UI font isn't loaded here
+  gfx::modal(what, "This can take a few seconds");
+  gfx::lendFace(nullptr);
 }
 
 }  // namespace
