@@ -343,7 +343,7 @@ bool open(const char* epubPath, String& error, float serverPercent) {
     for (int opt : kMargins) if (opt == px) s.params.marginLeft = s.params.marginRight = px;
   }
   s.params.marginTop = 46;  // room for the page header
-  s.params.marginBottom = 56;  // room for the page footer
+  s.params.marginBottom = 70;  // room for the page footer and progress axis
   s.params.baseSizePx = s.ttf ? 22 : 24;
   if (s.ttf && SdMan.exists(kFontSizeFile)) {
     const int px = atoi(SdMan.readFile(kFontSizeFile).c_str());
@@ -425,6 +425,8 @@ static void drawHeader() {
   gfx::fillRect(20, 38, gfx::W - 40, 1, true);
 }
 
+static void drawFooter();
+
 void draw(bool full) {
   if (!isOpen()) return;
   State& s = *st;
@@ -443,10 +445,7 @@ void draw(bool full) {
   }
   s.scratch.release(mark);
   drawHeader();
-  char footer[48];
-  snprintf(footer, sizeof(footer), "%d/%u   page %u/%u", s.spine + 1, (unsigned)s.book.spineCount(), (unsigned)s.page + 1,
-           (unsigned)s.pages.pageCount());
-  gfx::text(20, gfx::H - 40, footer);
+  drawFooter();
   Serial.printf("rendered in %u ms\n", (unsigned)(millis() - drawStart));
   // "full" is the periodic ghosting cleanup. A half refresh does it with far less flashing than a full one (1.7 s vs 3.8 s).
   gfx::flush(full ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
@@ -505,6 +504,46 @@ bool openToc(int i) {
   savePosition();
   draw(true);
   return true;
+}
+
+// Page footer: "chapter/total  page n/m" and, below it, the progress axis: a line for the whole book, a tick at the start of each
+// chapter and a dot for the current position.
+static void drawFooter() {
+  State& s = *st;
+  gfx::lendFace(s.ttf ? &s.faces[0] : nullptr);
+  char text[48];
+  snprintf(text, sizeof(text), "%d/%u   page %u/%u", s.spine + 1, (unsigned)s.book.spineCount(), (unsigned)s.page + 1,
+           (unsigned)s.pages.pageCount());
+  gfx::bigText(20, gfx::H - 62, text, 16);
+  gfx::lendFace(nullptr);
+
+  constexpr int x0 = 20, len = gfx::W - 40, y = gfx::H - 26;
+  gfx::fillRect(x0, y - 1, len, 2, true);
+  const int n = (int)s.book.spineCount();
+  constexpr int kMaxToc = 256;
+  int16_t tocSp[kMaxToc];
+  const int t = min((int)s.book.tocCount(), kMaxToc);
+  for (int i = 0; i < t; i++) tocSp[i] = (int16_t)tocSpine(i);
+  double total = 0;
+  for (int i = 0; i < n; i++) total += spineBytes(i);
+  double before = 0;
+  int lastX = -10;
+  for (int i = 0; i < n && total > 0; i++) {
+    bool marked = false;
+    for (int k = 0; k < t && !marked; k++) marked = tocSp[k] == i;
+    const int x = x0 + (int)(before / total * len);
+    if (marked && i > 0 && x - lastX >= 3) {  // the start of the book needs no tick
+      gfx::fillRect(x, y - 6, 2, 12, true);
+      lastX = x;
+    }
+    before += spineBytes(i);
+  }
+  const int dx = x0 + (int)(min(100.0f, progressPercent()) / 100.0f * len);
+  for (int j = -7; j <= 7; j++)  // a white ring so the dot stands out over the line and ticks
+    for (int i = -7; i <= 7; i++) {
+      const int d2 = i * i + j * j;
+      if (d2 <= 49) gfx::fillRect(dx + i, y + j, 1, 1, d2 <= 25);
+    }
 }
 
 int fontSize() { return isOpen() ? st->params.baseSizePx : 0; }
