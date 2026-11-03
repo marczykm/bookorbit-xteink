@@ -175,6 +175,9 @@ class FreeInkDisplay {
   // frame as the differential baseline; if that allocation fails it falls
   // back to the blocking path.
   void displayBufferAsync(RefreshMode mode = FAST_REFRESH);
+  // BookOrbit patch: with allowed = false the single-buffer async shadow (48 KB) is freed at once and not allocated again, so
+  // displayBufferAsync() falls back to a blocking refresh. Lets the Wi-Fi stack have the RAM during transfers.
+  void setAsyncShadowAllowed(bool allowed);
   // Async refresh without the single-buffer shadow (no extra RAM). The caller
   // promises (a) not to touch the framebuffer until the refresh completes
   // (waitRefreshComplete() / refreshBusy()==false / any blocking call), and
@@ -441,6 +444,7 @@ class FreeInkDisplay {
   void cancelGrayscalePass();
   bool acceptGrayscaleRows(unsigned plane, const uint8_t* data, uint16_t y, uint16_t rows);
   bool _refreshPending = false;
+  bool _shadowAllowed = true;
   uint8_t* _asyncShadow = nullptr;
   bool _shadowValid = false;
 #ifdef EINK_DISPLAY_SINGLE_BUFFER_MODE

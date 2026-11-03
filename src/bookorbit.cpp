@@ -47,7 +47,8 @@ bool begin(HTTPClient& http, Conn& conn, const String& url, const String& token,
   }
   http.setConnectTimeout(kTimeoutMs);
   http.setTimeout(kTimeoutMs);
-  http.useHTTP10(true);  // no chunked bodies, so the stream can be parsed directly
+  static const char* kHeaders[] = {"Transfer-Encoding"};
+  http.collectHeaders(kHeaders, 1);  // the response may be chunked: BodyStream needs to know
   if (!(https ? http.begin(conn.tls, url) : http.begin(conn.plain, url))) {
     error = "Bad server address";
     return false;
@@ -55,6 +56,144 @@ bool begin(HTTPClient& http, Conn& conn, const String& url, const String& token,
   if (token.length()) http.addHeader("Authorization", "Bearer " + token);
   return true;
 }
+
+void (*activityHook)(bool) = nullptr;
+// Marks the duration of a request for the app's low-memory mode.
+struct NetGuard {
+  NetGuard() { if (activityHook) activityHook(true); }
+  ~NetGuard() { if (activityHook) activityHook(false); }
+};
+
+// Success is any 2xx: the real server answers POSTs such as sign-in with 201 Created, the mock with 200.
+bool isOk(int code) { return code >= 200 && code < 300; }
+
+// A response body as a Stream, whatever its framing: Content-Length, chunked (what the real server sends) or until the
+// connection closes. pull() never waits, so a slow transfer cannot freeze the app; the blocking readers sit on top of it.
+class BodyStream : public Stream {
+ public:
+  explicit BodyStream(HTTPClient& http) : c_(http.getStreamPtr()) {
+    if (http.header("Transfer-Encoding").indexOf("chunked") >= 0) {
+      mode_ = Mode::Chunked;
+    } else if (http.getSize() >= 0) {
+      mode_ = Mode::Length;
+      remaining_ = http.getSize();
+    } else {
+      mode_ = Mode::Close;
+    }
+  }
+
+  // Copies what has arrived (at most len bytes) without waiting; 0 when nothing is there yet. Check done().
+  size_t pull(uint8_t* buf, size_t len) {
+    if (done_ || len == 0) return 0;
+    if (hasPeek_) {
+      buf[0] = peeked_;
+      hasPeek_ = false;
+      return 1;
+    }
+    size_t n = 0;
+    switch (mode_) {
+      case Mode::Length: {
+        n = min<size_t>(min<size_t>(len, remaining_), c_->available());
+        if (n) n = c_->read(buf, n);
+        remaining_ -= n;
+        if (remaining_ == 0) { done_ = true; complete_ = true; }
+        break;
+      }
+      case Mode::Close: {
+        n = min<size_t>(len, c_->available());
+        if (n) n = c_->read(buf, n);
+        if (n == 0 && !c_->connected()) { done_ = true; complete_ = true; }
+        break;
+      }
+      case Mode::Chunked: n = pullChunked(buf, len); break;
+    }
+    if (n == 0 && !done_ && !c_->connected() && c_->available() == 0) done_ = true;  // closed mid-body: incomplete
+    bytes_ += n;
+    return n;
+  }
+  bool done() const { return done_; }
+  bool complete() const { return complete_; }  // the whole body arrived (not cut off)
+  size_t bytes() const { return bytes_; }
+
+  // Blocking read: waits for data (up to kStallMs without any), returns 0 at the end or after a stall.
+  size_t readSome(uint8_t* buf, size_t len) {
+    const uint32_t start = millis();
+    for (;;) {
+      const size_t n = pull(buf, len);
+      if (n || done_) return n;
+      if (millis() - start > kStallMs) return 0;
+      delay(2);
+    }
+  }
+
+  // Stream interface for ArduinoJson.
+  int available() override { return (hasPeek_ ? 1 : 0) + (done_ ? 0 : c_->available()); }
+  int read() override {
+    uint8_t b;
+    return readSome(&b, 1) == 1 ? b : -1;
+  }
+  int peek() override {
+    if (!hasPeek_) {
+      const int v = read();
+      if (v < 0) return -1;
+      peeked_ = (uint8_t)v;
+      hasPeek_ = true;
+      if (bytes_) bytes_--;  // counted again when re-read
+    }
+    return peeked_;
+  }
+  size_t write(uint8_t) override { return 0; }
+
+ private:
+  static constexpr uint32_t kStallMs = 45000;  // the real server can pause for many seconds mid-response
+
+  size_t pullChunked(uint8_t* buf, size_t len) {
+    for (;;) {
+      switch (state_) {
+        case State::Size: {  // "<hex>[;ext]\r\n"
+          while (c_->available()) {
+            const int ch = c_->read();
+            if (ch == '\n') {
+              line_[lineLen_] = 0;
+              lineLen_ = 0;
+              chunkLeft_ = strtoul(line_, nullptr, 16);
+              if (chunkLeft_ == 0) { done_ = true; complete_ = true; return 0; }  // the final chunk; trailers are ignored
+              state_ = State::Data;
+              break;
+            }
+            if (ch != '\r' && lineLen_ < sizeof(line_) - 1) line_[lineLen_++] = (char)ch;
+          }
+          if (state_ == State::Size) return 0;
+          break;
+        }
+        case State::Data: {
+          const size_t n = min<size_t>(min<size_t>(len, chunkLeft_), c_->available());
+          if (n == 0) return 0;
+          const size_t got = c_->read(buf, n);
+          chunkLeft_ -= got;
+          if (chunkLeft_ == 0) { state_ = State::DataEnd; crlfLeft_ = 2; }
+          return got;
+        }
+        case State::DataEnd: {
+          while (crlfLeft_ && c_->available()) { c_->read(); crlfLeft_--; }
+          if (crlfLeft_) return 0;
+          state_ = State::Size;
+          break;
+        }
+      }
+    }
+  }
+
+  enum class Mode { Length, Chunked, Close } mode_ = Mode::Close;
+  enum class State { Size, Data, DataEnd } state_ = State::Size;
+  WiFiClient* c_;
+  bool hasPeek_ = false, done_ = false, complete_ = false;
+  long remaining_ = 0;
+  size_t chunkLeft_ = 0, bytes_ = 0;
+  uint8_t peeked_ = 0, crlfLeft_ = 0;
+  char line_[24];
+  size_t lineLen_ = 0;
+};
 
 String errorFor(int code) {
   if (code == 401) return "Unauthorized (HTTP 401)";
@@ -74,12 +213,15 @@ String fileSafe(const char* s) {
 }
 }  // namespace
 
+void BookOrbit::setActivityHook(void (*hook)(bool)) { activityHook = hook; }
+
 void BookOrbit::configure(const String& server, bool insecure) {
   server_ = server;
   insecureTls = insecure;
 }
 
 bool BookOrbit::login(const String& user, const String& password, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/auth/login", "", error)) return false;
@@ -92,17 +234,19 @@ bool BookOrbit::login(const String& user, const String& password, String& error)
   String payload;
   serializeJson(body, payload);
   const int code = http.POST(payload);
-  if (code != 200) {
+  if (!isOk(code)) {
     error = code == 401 ? "Wrong username or password" : errorFor(code);
     http.end();
     return false;
   }
   JsonDocument doc;
-  const bool bad = static_cast<bool>(deserializeJson(doc, http.getStream()));
+  BodyStream resp(http);
+  const auto parseErr = deserializeJson(doc, resp);
   http.end();
   token_ = doc["accessToken"] | "";
   refreshToken_ = doc["refreshToken"] | "";
-  if (bad || token_.isEmpty()) {
+  if (parseErr || token_.isEmpty()) {
+    Serial.printf("login: HTTP %d, parse %s, access token %s\n", code, parseErr.c_str(), token_.isEmpty() ? "missing" : "present");
     error = "Unexpected login response";
     return false;
   }
@@ -110,6 +254,7 @@ bool BookOrbit::login(const String& user, const String& password, String& error)
 }
 
 int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/books/query", token_, error)) return -1;
@@ -122,7 +267,7 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
   String payload;
   serializeJson(body, payload);
   const int code = http.POST(payload);
-  if (code != 200) {
+  if (!isOk(code)) {
     error = errorFor(code);
     http.end();
     return -1;
@@ -136,9 +281,12 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
   filter["items"][0]["files"][0]["id"] = true;
   filter["items"][0]["files"][0]["format"] = true;
   JsonDocument doc;
-  const auto err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  BodyStream resp(http);
+  const uint32_t tList = millis();
+  const auto err = deserializeJson(doc, resp, DeserializationOption::Filter(filter));
   http.end();
   if (err) {
+    Serial.printf("books/query: %s after %u bytes, %u ms reading\n", err.c_str(), (unsigned)resp.bytes(), (unsigned)(millis() - tList));
     error = String("Bad response: ") + err.c_str();
     return -1;
   }
@@ -163,6 +311,7 @@ int BookOrbit::listBooksOnce(int page, int pageSize, Book* out, int max, int& to
 }
 
 bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   found = false;
@@ -175,7 +324,7 @@ bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& foun
   String payload;
   serializeJson(body, payload);
   const int code = http.POST(payload);
-  if (code != 200) {
+  if (!isOk(code)) {
     error = errorFor(code);
     http.end();
     return false;
@@ -188,7 +337,8 @@ bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& foun
   filter["items"][0]["books"][0]["files"][0]["id"] = true;
   filter["items"][0]["books"][0]["files"][0]["format"] = true;
   JsonDocument doc;
-  const auto err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  BodyStream resp(http);
+  const auto err = deserializeJson(doc, resp, DeserializationOption::Filter(filter));
   http.end();
   if (err) {
     error = String("Bad response: ") + err.c_str();
@@ -209,7 +359,49 @@ bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& foun
   return true;
 }
 
+bool BookOrbit::fetchThumbnailOnce(long bookId, const String& path, String& error) {
+  NetGuard netGuard;
+  Conn client;
+  HTTPClient http;
+  if (!begin(http, client, server_ + "/api/v1/books/" + String(bookId) + "/thumbnail", token_, error)) return false;
+  const int code = http.GET();
+  if (!isOk(code)) {
+    error = errorFor(code);
+    http.end();
+    return false;
+  }
+  SdMan.ensureDirectoryExists("/BookOrbit");
+  SdMan.ensureDirectoryExists("/BookOrbit/.covers");
+  SdMan.remove(path.c_str());
+  FsFile file = SdMan.open(path.c_str(), O_WRITE | O_CREAT | O_TRUNC);
+  if (!file) {
+    error = "Cannot write to SD card";
+    http.end();
+    return false;
+  }
+  BodyStream in(http);
+  uint8_t buf[1024];
+  size_t done = 0;
+  bool writeFailed = false;
+  for (;;) {
+    const size_t n = in.readSome(buf, sizeof(buf));
+    if (n == 0) break;
+    if (file.write(buf, n) != n) { writeFailed = true; break; }
+    done += n;
+    if (done > 1024 * 1024) break;  // a thumbnail this big is not a thumbnail
+  }
+  file.close();
+  http.end();
+  if (writeFailed || done == 0 || !in.complete()) {
+    SdMan.remove(path.c_str());
+    error = "Thumbnail download incomplete";
+    return false;
+  }
+  return true;
+}
+
 bool BookOrbit::fetchWidgetsOnce(const char* const* types, int count, String& json, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/dashboard/widgets/batch", token_, error)) return false;
@@ -219,13 +411,14 @@ bool BookOrbit::fetchWidgetsOnce(const char* const* types, int count, String& js
   String payload;
   serializeJson(body, payload);
   const int code = http.POST(payload);
-  if (code != 200) {
+  if (!isOk(code)) {
     error = errorFor(code);
     http.end();
     return false;
   }
   JsonDocument doc;
-  const auto err = deserializeJson(doc, http.getStream());
+  BodyStream resp(http);
+  const auto err = deserializeJson(doc, resp);
   http.end();
   if (err) {
     error = String("Bad response: ") + err.c_str();
@@ -240,52 +433,9 @@ bool BookOrbit::fetchWidgetsOnce(const char* const* types, int count, String& js
   return true;
 }
 
-bool BookOrbit::fetchThumbnailOnce(long bookId, const String& path, String& error) {
-  Conn client;
-  HTTPClient http;
-  if (!begin(http, client, server_ + "/api/v1/books/" + String(bookId) + "/thumbnail", token_, error)) return false;
-  const int code = http.GET();
-  if (code != 200) {
-    error = errorFor(code);
-    http.end();
-    return false;
-  }
-  SdMan.ensureDirectoryExists("/BookOrbit");
-  SdMan.ensureDirectoryExists("/BookOrbit/.covers");
-  SdMan.remove(path.c_str());
-  FsFile file = SdMan.open(path.c_str(), O_WRITE | O_CREAT | O_TRUNC);
-  if (!file) {
-    error = "Cannot write to SD card";
-    http.end();
-    return false;
-  }
-  size_t done = 0;
-  uint8_t buf[1024];
-  Stream& in = http.getStream();
-  uint32_t lastData = millis();
-  while ((http.connected() || in.available()) && millis() - lastData < kTimeoutMs) {
-    const int avail = in.available();
-    if (avail > 0) {
-      const int n = in.readBytes(buf, min<size_t>(avail, sizeof(buf)));
-      if (n > 0 && file.write(buf, n) != (size_t)n) break;
-      done += n;
-      lastData = millis();
-      if (done > 1024 * 1024) break;  // a thumbnail this big is not a thumbnail
-    } else {
-      delay(5);
-    }
-  }
-  file.close();
-  http.end();
-  if (done == 0) {
-    SdMan.remove(path.c_str());
-    error = "Empty thumbnail";
-    return false;
-  }
-  return true;
-}
 
 bool BookOrbit::postSessionOnce(long fileId, const String& body, bool& rejected, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   rejected = false;
@@ -300,6 +450,7 @@ bool BookOrbit::postSessionOnce(long fileId, const String& body, bool& rejected,
 }
 
 bool BookOrbit::postProgressOnce(long fileId, float percentage, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/books/files/" + String(fileId) + "/progress", token_, error)) return false;
@@ -314,17 +465,19 @@ bool BookOrbit::postProgressOnce(long fileId, float percentage, String& error) {
 }
 
 bool BookOrbit::getProgressOnce(long fileId, float& percentage, String& error) {
+  NetGuard netGuard;
   Conn client;
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/books/files/" + String(fileId) + "/progress", token_, error)) return false;
   const int code = http.GET();
-  if (code != 200) {
+  if (!isOk(code)) {
     error = errorFor(code);
     http.end();
     return false;
   }
   JsonDocument doc;
-  const bool bad = static_cast<bool>(deserializeJson(doc, http.getStream()));
+  BodyStream resp(http);
+  const bool bad = static_cast<bool>(deserializeJson(doc, resp));
   http.end();
   percentage = doc["percentage"] | 0.0f;
   return !bad;
@@ -333,6 +486,7 @@ bool BookOrbit::getProgressOnce(long fileId, float& percentage, String& error) {
 String BookOrbit::pathFor(const Book& book) { return "/BookOrbit/" + fileSafe(book.title) + ".epub"; }
 
 bool BookOrbit::downloadOnce(const Book& book, String& path, String& error, void (*progress)(size_t, size_t)) {
+  NetGuard netGuard;
   if (!book.fileId) {
     error = "No EPUB file for this book";
     return false;
@@ -341,7 +495,7 @@ bool BookOrbit::downloadOnce(const Book& book, String& path, String& error, void
   HTTPClient http;
   if (!begin(http, client, server_ + "/api/v1/books/files/" + String(book.fileId) + "/serve", token_, error)) return false;
   const int code = http.GET();
-  if (code != 200) {
+  if (!isOk(code)) {
     error = errorFor(code);
     http.end();
     return false;
@@ -358,26 +512,19 @@ bool BookOrbit::downloadOnce(const Book& book, String& path, String& error, void
   const size_t total = http.getSize() > 0 ? http.getSize() : 0;
   size_t done = 0;
   uint8_t buf[1024];
-  Stream& in = http.getStream();
-  uint32_t lastData = millis();
-  while (http.connected() || in.available()) {
-    const int n = in.readBytes(buf, in.available() ? min<size_t>(in.available(), sizeof(buf)) : 0);
-    if (n > 0) {
-      if (file.write(buf, n) != (size_t)n) {
-        error = "SD write failed (card full?)";
-        file.close();
-        SdMan.remove(tmp.c_str());
-        http.end();
-        return false;
-      }
-      done += n;
-      lastData = millis();
-      if (progress) progress(done, total);
-    } else if (millis() - lastData > kTimeoutMs) {
-      break;
-    } else {
-      delay(5);
+  BodyStream in(http);
+  for (;;) {
+    const size_t n = in.readSome(buf, sizeof(buf));
+    if (n == 0) break;
+    if (file.write(buf, n) != n) {
+      error = "SD write failed (card full?)";
+      file.close();
+      SdMan.remove(tmp.c_str());
+      http.end();
+      return false;
     }
+    done += n;
+    if (progress) progress(done, total);
   }
   file.close();
   http.end();
@@ -393,6 +540,7 @@ bool BookOrbit::downloadOnce(const Book& book, String& path, String& error, void
 
 // The access token can expire while the library is open; a 401 triggers one refresh and one retry.
 bool BookOrbit::refresh() {
+  NetGuard netGuard;
   if (refreshToken_.isEmpty()) return false;
   Conn client;
   HTTPClient http;
@@ -401,7 +549,8 @@ bool BookOrbit::refresh() {
   http.addHeader("Content-Type", "application/json");
   const int code = http.POST("{\"refreshToken\":\"" + refreshToken_ + "\"}");
   JsonDocument doc;
-  const bool bad = code != 200 || static_cast<bool>(deserializeJson(doc, http.getStream()));
+  BodyStream resp(http);
+  const bool bad = !isOk(code) || static_cast<bool>(deserializeJson(doc, resp));
   http.end();
   refreshToken_ = "";  // refresh tokens are single-use
   if (bad || String(doc["accessToken"] | "").isEmpty()) return false;
@@ -425,17 +574,18 @@ bool BookOrbit::fetchContinueReading(Book& book, float& progress, bool& found, S
   return ok;
 }
 
+bool BookOrbit::fetchThumbnail(long bookId, const String& path, String& error) {
+  bool ok = fetchThumbnailOnce(bookId, path, error);
+  if (!ok && unauthorized(error) && refresh()) ok = fetchThumbnailOnce(bookId, path, error);
+  return ok;
+}
+
 bool BookOrbit::fetchWidgets(const char* const* types, int count, String& json, String& error) {
   bool ok = fetchWidgetsOnce(types, count, json, error);
   if (!ok && unauthorized(error) && refresh()) ok = fetchWidgetsOnce(types, count, json, error);
   return ok;
 }
 
-bool BookOrbit::fetchThumbnail(long bookId, const String& path, String& error) {
-  bool ok = fetchThumbnailOnce(bookId, path, error);
-  if (!ok && unauthorized(error) && refresh()) ok = fetchThumbnailOnce(bookId, path, error);
-  return ok;
-}
 
 bool BookOrbit::postSession(long fileId, const String& body, bool& rejected, String& error) {
   bool ok = postSessionOnce(fileId, body, rejected, error);

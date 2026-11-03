@@ -298,6 +298,16 @@ void FreeInkDisplay::begin() {
   _driver->begin(_bus);
 }
 
+void FreeInkDisplay::setAsyncShadowAllowed(bool allowed) {
+  _shadowAllowed = allowed;
+  if (!allowed) {
+    waitRefreshComplete();
+    free(_asyncShadow);
+    _asyncShadow = nullptr;
+    _shadowValid = false;
+  }
+}
+
 // ============================================================================
 // Framebuffer composition (facade-owned; no driver involvement)
 // ============================================================================
@@ -754,7 +764,7 @@ void FreeInkDisplay::displayAsyncImpl(RefreshMode mode, bool turnOffScreen, bool
     displayBuffer(mode, turnOffScreen);
     return;
   }
-  if (_asyncShadow == nullptr) {
+  if (_asyncShadow == nullptr && _shadowAllowed) {
     _asyncShadow = static_cast<uint8_t*>(malloc(bufferSize));
     _shadowValid = false;
   }

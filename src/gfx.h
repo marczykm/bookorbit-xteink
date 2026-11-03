@@ -32,6 +32,8 @@ const char* ellipsize(const char* utf8, int maxWidth);
 // Starts a panel refresh and returns at once (the panel finishes on its own, ~0.5-2 s), so buttons keep being read meanwhile.
 void flush(EInkDisplay::RefreshMode mode);
 bool busy();      // a refresh is still running on the panel
+// Low-memory mode (during network transfers): frees the 48 KB refresh shadow and refreshes block until it is switched off.
+void setLowMemory(bool on);
 void waitIdle();  // block until it is done
 void dumpFramebuffer();  // hex over serial, for screenshots without a camera
 }  // namespace gfx

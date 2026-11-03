@@ -221,9 +221,9 @@ static void flushSessions() {
   if (left.isEmpty()) SdMan.remove(kSessionOutbox); else SdMan.writeFile(kSessionOutbox, left);
 }
 
-constexpr int kPageSize = 8;
+constexpr int kPageSize = 9;
 constexpr int kMargin = 16;
-constexpr int kRowHeight = 80;
+constexpr int kRowHeight = 70;
 constexpr int kListTop = 64;
 
 Book books[kPageSize];
@@ -236,7 +236,7 @@ int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
 constexpr const char* kKeyboardFile = "/BookOrbit/.keyboard";
 int settingsSel = 0;  // Settings list: Wi-Fi on/off, network, server, username, password, companion, sleep timer
-int homeSel = 0;  // Home menu: 0 = Library, 1 = the Reading now card
+int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
@@ -290,7 +290,7 @@ static void handleSerial() {
       }
       if (line == "SLEEP") goToSleep();
       if (line == "WIFITOGGLE") { extern void testToggleWifi(); testToggleWifi(); }  // test hook
-      if (line == "CLEARCOVERS") { SdMan.removeDir("/BookOrbit/.covers"); ESP.restart(); }  // test hook
+      if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
       if (line.startsWith("CFG:")) {
@@ -424,6 +424,15 @@ static void drawHints(bool back = true, bool ok = true, bool paging = true, bool
   }
 }
 
+// A small "saved on the device" icon: an arrow dropping into a tray.
+static void drawDownloadedIcon(int x, int y, bool ink) {
+  gfx::fillRect(x + 6, y, 4, 8, ink);                                          // arrow shaft
+  for (int r = 0; r < 6; r++) gfx::fillRect(x + 8 - (6 - r), y + 7 + r, 2 * (6 - r), 1, ink);  // arrow head
+  gfx::fillRect(x, y + 15, 16, 2, ink);                                         // tray bottom
+  gfx::fillRect(x, y + 11, 2, 6, ink);                                          // tray sides
+  gfx::fillRect(x + 14, y + 11, 2, 6, ink);
+}
+
 // Text in a normal row (black) or a highlighted one (white on the black highlight).
 static void label(int x, int y, const char* s, bool highlighted) { gfx::text(x, y, s, !highlighted); }
 
@@ -437,16 +446,10 @@ static void drawList(bool full) {
     const int y = kListTop + i * kRowHeight;
     const bool sel = i == selected;
     if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
-    // Cover: a white plate with a frame (so it also shows on the black selection band), then the cached 1-bit image.
-    gfx::fillRect(kMargin, y + 1, cover::W + 2, cover::H + 2, false);
-    gfx::fillRect(kMargin, y + 1, cover::W + 2, cover::H + 2, true);
-    gfx::fillRect(kMargin + 1, y + 2, cover::W, cover::H, false);
-    uint8_t bits[cover::kBytes];
-    if (books[i].id && cover::load(books[i].id, bits)) gfx::blit1bit(kMargin + 1, y + 2, bits, cover::W, cover::H);
-    const int textX = kMargin + cover::W + 2 + 14, textW = gfx::W - textX - 34;
-    label(textX, y + 8, gfx::ellipsize(books[i].title, textW), sel);
-    label(textX, y + 8 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), sel);
-    if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) gfx::fillRect(gfx::W - 24, y + 28, 12, 12, !sel);  // downloaded
+    const int textX = kMargin + 4, textW = gfx::W - textX - 34;
+    label(textX, y + 4, gfx::ellipsize(books[i].title, textW), sel);
+    label(textX, y + 4 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), sel);
+    if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) drawDownloadedIcon(gfx::W - 16 - 14, y + 24 - 2, !sel);  // on the card
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
   if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
@@ -548,7 +551,9 @@ static bool refreshStats() {
   Book now;
   float nowProgress = 0;
   bool found = false;
-  if (api.fetchContinueReading(now, nowProgress, found, error) && found) {  // add the book being read to the cached document
+  const bool contOk = api.fetchContinueReading(now, nowProgress, found, error);
+  Serial.printf("continue reading: %s%s\n", contOk ? (found ? "found: " : "nothing in progress") : "request failed: ", contOk ? (found ? now.title : "") : error.c_str());
+  if (contOk && found) {  // add the book being read to the cached document
     JsonDocument doc;
     deserializeJson(doc, json);
     doc["reading-now"]["id"] = now.id;
@@ -681,31 +686,44 @@ static void drawPet(int x, int y, bool sel) {
   if (line2.length()) label(x + 84, y + 30, line2.c_str(), sel);
 }
 
+void testFakeNow() {  // test hook: pretend a book is in progress
+  stats.readingNow = true;
+  stats.nowId = 359;  // a book of the real test library
+  strlcpy(stats.nowTitle, "Wybaczam ci", sizeof(stats.nowTitle));
+  strlcpy(stats.nowAuthor, "Remigiusz Mroz", sizeof(stats.nowAuthor));
+  stats.nowProgress = 42;  // press a key afterwards to redraw
+}
+
+// The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected.
+static void drawReadingNow(int y, bool sel) {
+  constexpr int kFull = gfx::W - 2 * kMargin;
+  char buf[16];
+  frame(kMargin, y, kFull, 96, 8, sel);
+  label(kMargin + 68, y + 1, "Reading now", sel);
+  roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, false);  // white plate so the cover shows on dark too
+  roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, true);
+  gfx::fillRect(kMargin + 10, y + 13, cover::W, cover::H, false);
+  uint8_t bits[cover::kBytes];
+  if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
+  label(kMargin + 68, y + 23, gfx::ellipsize(stats.nowTitle, kFull - 80), sel);
+  label(kMargin + 68, y + 44, gfx::ellipsize(stats.nowAuthor, kFull - 80), sel);
+  bar(kMargin + 68, y + 79, kFull - 68 - 70, 12, stats.nowProgress / 100.0f, sel);
+  snprintf(buf, sizeof(buf), "%d%%", (int)stats.nowProgress);
+  label(kMargin + kFull - 62, y + 64, buf, sel);
+}
+
+// Home items from the top: Reading now (when there is a book in progress), then Library. homeSel counts them.
+static bool readingSelected() { return stats.readingNow && homeSel == 0; }
+static bool librarySelected() { return homeSel == (stats.readingNow ? 1 : 0); }
+
 // The stats panel under the Home menu: y from 146 down to 700.
-static void drawStats() {
+static void drawStats(int y) {
   if (!stats.any()) {
-    gfx::text(kMargin, 172, "Statistics appear after the first sync.");
+    gfx::text(kMargin, y + 26, "Statistics appear after the first sync.");
     return;
   }
   constexpr int kHalf = 220, kRight = kMargin + kHalf + 8, kFull = gfx::W - 2 * kMargin;
   char buf[64];
-  int y = 146;
-  if (stats.readingNow) {  // the book being read: cover, title, author, progress
-    const bool sel = homeSel == 1;  // selected: dark like the selected Library row, with light text
-    frame(kMargin, y, kFull, 96, 8, sel);
-    label(kMargin + 68, y + 1, "Reading now", sel);
-    roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, false);  // white plate so the cover shows on dark too
-    roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, true);
-    gfx::fillRect(kMargin + 10, y + 13, cover::W, cover::H, false);
-    uint8_t bits[cover::kBytes];
-    if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
-    label(kMargin + 68, y + 24, gfx::ellipsize(stats.nowTitle, kFull - 80), sel);
-    label(kMargin + 68, y + 46, gfx::ellipsize(stats.nowAuthor, kFull - 80), sel);
-    bar(kMargin + 68, y + 78, kFull - 68 - 70, 12, stats.nowProgress / 100.0f, sel);
-    snprintf(buf, sizeof(buf), "%d%%", (int)stats.nowProgress);
-    label(kMargin + kFull - 62, y + 62, buf, sel);
-    y += 102;
-  }
   drawPet(kMargin, y, false);  // display only; the companion is chosen in Settings
   y += 86;
   if (stats.streak) {
@@ -766,9 +784,13 @@ static void drawStats() {
 static void drawHome(bool full) {
   gfx::clear();
   header("BookOrbit");
-  if (!stats.readingNow && homeSel == 1) homeSel = 0;
-  const int y = kListTop;
-  const bool sel = homeSel == 0;
+  if (!stats.readingNow && homeSel > 0) homeSel = 0;
+  int y = kListTop;
+  if (stats.readingNow) {
+    drawReadingNow(y, readingSelected());
+    y += 102;
+  }
+  const bool sel = librarySelected();
   frame(kMargin, y, gfx::W - 2 * kMargin, kRowHeight - 4, 8, sel);
   // Library icon: books standing on a shelf, one leaning. Ink is white on the highlighted (black) row.
   const bool ink = !sel;
@@ -788,7 +810,7 @@ static void drawHome(bool full) {
   } else {
     label(kMargin + 74, y + 20, "Library", sel);
   }
-  drawStats();
+  drawStats(y + kRowHeight - 4 + 6);
   if (net == Net::Connecting) gfx::text(kMargin, gfx::H - 96, "Connecting...", true);
   if (net == Net::Offline) gfx::text(kMargin, gfx::H - 96, "Offline - hold Back to connect", true);
   drawHints(true, true, false, true);
@@ -926,6 +948,7 @@ static void startWifi() {
   SdMan.remove(kWifiOffFlag);
   WiFi.disconnect(true);
   WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
   WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
   net = Net::Connecting;
   netStart = millis();
@@ -954,7 +977,7 @@ static String normalizeServer(String value) {
 }
 
 // Switching to another server removes everything that belongs to the old one: downloaded books (and their reading
-// caches), the queued progress and sessions (their file ids mean nothing on the new server), covers, library list, stats.
+// caches), the queued progress and sessions (their file ids mean nothing on the new server), library list, stats.
 static void clearServerData() {
   SdMan.removeDir("/BookOrbit/.covers");
   SdMan.removeDir("/BookOrbit/.library");
@@ -999,7 +1022,7 @@ static bool saveAccountField(int target, String value) {
   serializeJsonPretty(doc, json);
   SdMan.writeFile("/bookorbit.json", json);
   api.configure(config.server, config.insecureTls);
-  if (serverChanged) clearServerData();  // another server: its books, covers and numbers do not apply
+  if (serverChanged) clearServerData();  // another server: its books and numbers do not apply
   if (!SdMan.exists(kWifiOffFlag)) {  // sign in again in the background
     if (WiFi.getMode() == WIFI_OFF) startWifi();
     net = Net::Connecting;
@@ -1012,6 +1035,7 @@ static void scanForNetworks() {
   message("Wi-Fi", "Scanning for networks...", false);
   const bool wasOff = WiFi.getMode() == WIFI_OFF;
   if (wasOff) WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
   int n = WiFi.scanNetworks(false, false);
   if (n < 0) {  // busy joining a network: stop that and scan again
     WiFi.disconnect();
@@ -1305,7 +1329,7 @@ static void drawConfirm(bool full) {
   gfx::text(kMargin + 80, y, gfx::ellipsize(pendingServer.c_str(), gfx::W - 2 * kMargin - 80));
   y += gfx::lineHeight() + 20;
   y = wrapText(kMargin, y, gfx::W - 2 * kMargin,
-               "Switching removes everything that came from the old server: downloaded books, covers, statistics and reading "
+               "Switching removes everything that came from the old server: downloaded books, statistics and reading "
                "positions waiting to sync. Books you copied to the card yourself are not touched. After switching, set your "
                "username and password for the new server.");
   const char* labels[2] = {"Cancel", "Switch and clear data"};
@@ -1369,6 +1393,7 @@ static void pumpDisplay() {
 
 static bool connectWifi(String& error) {
   WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
   WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
   const uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -1386,7 +1411,7 @@ static bool ensureWifi(String& error) {
 }
 
 // The library list is cached per page on the SD card so it can be browsed without a connection.
-static String cachePath(int p) { return "/BookOrbit/.library/8-" + String(p) + ".json"; }
+static String cachePath(int p) { return "/BookOrbit/.library/9-" + String(p) + ".json"; }
 
 static void saveCachedPage(int p) {
   JsonDocument doc;
@@ -1439,11 +1464,13 @@ static bool loadPage(int newPage, String& error) {
         return true;
       }
     }
+    Serial.printf("library page %d: %s\n", newPage, netError.c_str());
     if (!loadCachedPage(newPage)) {
       error = netError;
       return false;
     }
-    net = Net::Offline;  // connection lost: carry on from the cache
+    // Only a lost connection puts the app offline; a one-off bad response just shows the cached page this time.
+    if (WiFi.status() != WL_CONNECTED || netError.startsWith("Cannot reach")) net = Net::Offline;
     offlineReason = netError;
     return true;
   }
@@ -1621,6 +1648,13 @@ void setup() {
     }
     fatal("Cannot open book", openError);
   }
+  if (SdMan.exists("/BookOrbit/.covers") && !SdMan.exists("/BookOrbit/.covers/.single")) {  // older versions cached a cover per library book
+    SdMan.removeDir("/BookOrbit/.covers");
+    SdMan.ensureDirectoryExists("/BookOrbit/.covers");
+    SdMan.writeFile("/BookOrbit/.covers/.single", "1");
+    for (const String& name : SdMan.listFiles("/BookOrbit/.library", 100))
+      if (name.startsWith("8-")) SdMan.remove((String("/BookOrbit/.library/") + name).c_str());
+  }
   loadStatsCache();
   loadPet();
   screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
@@ -1628,6 +1662,14 @@ void setup() {
   String error;
   if (!config.load(error)) fatal("Setup needed", error + "\nSee config.example.json");
 
+  BookOrbit::setActivityHook([](bool active) {  // free the refresh shadow while the radio moves data
+    static int depth = 0;
+    if (active) {
+      if (depth++ == 0) gfx::setLowMemory(true);
+    } else if (depth > 0 && --depth == 0) {
+      gfx::setLowMemory(false);
+    }
+  });
   api.configure(config.server, config.insecureTls);
   if (config.timezone.length()) {
     setenv("TZ", config.timezone.c_str(), 1);
@@ -1643,6 +1685,7 @@ void setup() {
     net = Net::Connecting;
     netStart = millis();
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
     WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
     Serial.printf("library: %d books (cached, connecting in the background)\n", bookCount);
     showList(true);
@@ -1703,30 +1746,23 @@ static void backgroundSync() {
   showList(false);
 }
 
-// Downloads one missing cover of the visible page per call (so buttons stay responsive), then redraws once when none are left.
-static void fetchNextCover() {
-  static bool dirty = false;
+
+// The cover of the Reading now book is fetched once (one small download, decoded on the spot) while Home is idle and online.
+static void fetchReadingCover() {
   static uint32_t retryAfter = 0;
-  if (net != Net::Online || millis() < retryAfter) return;
-  // Candidates: the book being read now (shown on Home) and, on the library screen, the visible page.
-  const int n = bookCount + 1;
-  for (int k = 0; k < n; k++) {
-    const long id = k == 0 ? (stats.readingNow ? stats.nowId : 0) : (screen == Screen::Library ? books[k - 1].id : 0);
-    if (!id || cover::cached(id)) continue;
-    String error;
-    if (api.fetchThumbnail(id, cover::stagingPath(), error) && cover::convertStaged(id, error)) {
-      Serial.printf("cover %ld cached\n", id);
-      dirty = true;
-    } else {
-      Serial.printf("cover %ld failed: %s\n", id, error.c_str());
-      if (error.indexOf("404") >= 0) cover::markNone(id);  // the book has no cover
-      else retryAfter = millis() + 30000;                   // network trouble: try again later
-    }
-    return;
-  }
-  if (dirty) {
-    dirty = false;
-    showList(false);
+  const long id = stats.nowId;
+  if (!stats.readingNow || !id || net != Net::Online || millis() < retryAfter || cover::cached(id)) return;
+  String error;
+  if (api.fetchThumbnail(id, cover::stagingPath(), error)) {
+    gfx::setLowMemory(true);  // the decoder wants the RAM the refresh shadow would use
+    const bool ok = cover::convertStaged(id, error);  // an unusable image is marked, not retried
+    gfx::setLowMemory(false);
+    Serial.printf("cover %ld: %s\n", id, ok ? "cached" : error.c_str());
+    if (ok) showList(false);
+  } else {
+    Serial.printf("cover %ld failed: %s\n", id, error.c_str());
+    if (error.indexOf("404") >= 0) cover::markNone(id);
+    else retryAfter = millis() + 60000;
   }
 }
 
@@ -1737,6 +1773,7 @@ static void toggleWifi() {
     netStart = millis();
     SdMan.remove(kWifiOffFlag);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // modem sleep delays inbound data by seconds on some access points
     WiFi.begin(config.ssid.c_str(), config.wifiPassword.c_str());
     Serial.println("wifi on");
   } else {
@@ -1801,21 +1838,21 @@ void loop() {
       screen = Screen::Settings;
       settingsSel = 0;
       showList(false);
-    } else if (pressed(InputManager::BTN_DOWN) && homeSel == 0 && stats.readingNow) {
-      homeSel = 1;
+    } else if (pressed(InputManager::BTN_DOWN) && homeSel < (stats.readingNow ? 1 : 0)) {
+      homeSel++;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && homeSel == 1) {
-      homeSel = 0;
+    } else if (pressed(InputManager::BTN_UP) && homeSel > 0) {
+      homeSel--;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
-      if (homeSel == 1 && stats.readingNow) {
+      if (readingSelected()) {
         openReadingNow();
       } else {
         screen = Screen::Library;
         showList(false);
       }
     } else {
-      fetchNextCover();  // the Reading now cover
+      fetchReadingCover();  // idle: fetch the Reading now cover once
     }
     delay(10);
     return;
@@ -1971,6 +2008,5 @@ void loop() {
     busy = false;
     if (ok) showList(false); else message("Error", error + "\n\nPress any button");
   }
-  else fetchNextCover();  // idle: fetch covers one at a time (library screen only)
   delay(10);
 }

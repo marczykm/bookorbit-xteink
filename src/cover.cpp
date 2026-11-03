@@ -11,33 +11,37 @@ String nonePath(long id) { return "/BookOrbit/.covers/" + String(id) + ".none"; 
 
 // Box-filter accumulation of source pixels into the W x H target, keeping the cover's aspect ratio (centred, white around).
 struct Scaler {
-  uint32_t* sums = nullptr;
-  uint16_t* counts = nullptr;
+  uint16_t* sums = nullptr;  // gray/4 summed per target pixel
+  uint16_t colCnt[W] = {}, rowCnt[H] = {};  // source columns / rows landing on each target column / row
   int srcW = 0, srcH = 0, dstW = 0, dstH = 0, offX = 0, offY = 0;
 
+  // The sum buffer has a fixed size, so it can be taken before a decoder claims its large blocks.
+  bool alloc() {
+    sums = (uint16_t*)calloc(W * H, sizeof(uint16_t));
+    return sums != nullptr;
+  }
+  // Maps a source of sw x sh pixels onto the target, keeping the aspect ratio (centred, white around).
   bool init(int sw, int sh) {
     srcW = sw;
     srcH = sh;
-    if (sw <= 0 || sh <= 0) return false;
+    if (sw <= 0 || sh <= 0 || !sums) return false;
     if ((long)sw * H > (long)sh * W) { dstW = W; dstH = max(1, sh * W / sw); }
     else { dstH = H; dstW = max(1, sw * H / sh); }
     offX = (W - dstW) / 2;
     offY = (H - dstH) / 2;
-    sums = (uint32_t*)calloc(W * H, sizeof(uint32_t));
-    counts = (uint16_t*)calloc(W * H, sizeof(uint16_t));
-    return sums && counts;
+    memset(colCnt, 0, sizeof(colCnt));
+    memset(rowCnt, 0, sizeof(rowCnt));
+    for (int x = 0; x < sw; x++) colCnt[offX + x * dstW / sw]++;
+    for (int y = 0; y < sh; y++) rowCnt[offY + y * dstH / sh]++;
+    return true;
   }
   void add(int x, int y, uint8_t gray) {
     if (x < 0 || y < 0 || x >= srcW || y >= srcH) return;
-    const int i = (offY + y * dstH / srcH) * W + offX + x * dstW / srcW;
-    sums[i] += gray;
-    counts[i]++;
+    sums[(offY + y * dstH / srcH) * W + offX + x * dstW / srcW] += gray >> 2;
   }
   void free_() {
     free(sums);
-    free(counts);
     sums = nullptr;
-    counts = nullptr;
   }
   // Ordered 4x4 Bayer dither to 1 bit; pixels nothing landed on stay white.
   void toBits(uint8_t* bits) const {
@@ -45,8 +49,8 @@ struct Scaler {
     memset(bits, 0, kBytes);
     for (int y = 0; y < H; y++)
       for (int x = 0; x < W; x++) {
-        const int i = y * W + x;
-        const int gray = counts[i] ? sums[i] / counts[i] : 255;
+        const uint32_t count = (uint32_t)colCnt[x] * rowCnt[y];
+        const int gray = count ? (int)(sums[y * W + x] / count) * 4 : 255;
         const bool black = gray < (bayer[y & 3][x & 3] * 16 + 8);
         if (black) bits[y * (W / 8) + x / 8] |= 0x80 >> (x & 7);
       }
@@ -73,6 +77,7 @@ void pngDraw(pngle_t* p, uint32_t x, uint32_t y, uint32_t, uint32_t, const uint8
 
 bool decodePng(FsFile& f, Scaler& s) {
   PngCtx ctx{&s};
+  if (!s.alloc()) return false;  // before the decoder takes its big blocks
   pngle_t* p = pngle_new();
   if (!p) return false;
   pngle_set_user_data(p, &ctx);
@@ -116,6 +121,7 @@ int jpgOut(JDEC* jd, void* bitmap, JRECT* r) {
 
 bool decodeJpeg(FsFile& f, Scaler& s) {
   static constexpr size_t kPool = 8 * 1024;
+  if (!s.alloc()) return false;
   void* pool = malloc(kPool);
   if (!pool) return false;
   JpgCtx ctx{&f, &s};

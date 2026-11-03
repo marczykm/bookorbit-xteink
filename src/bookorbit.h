@@ -13,6 +13,8 @@ class BookOrbit {
  public:
   // `insecure` skips certificate checks (for self-signed servers).
   void configure(const String& server, bool insecure = false);
+  // Called with true when a transfer starts and false when it ends (nestable), so the app can free RAM for the Wi-Fi stack.
+  static void setActivityHook(void (*hook)(bool active));
   bool login(const String& user, const String& password, String& error);
   // Fills up to `max` books of one page; returns the count, or -1 on error. `total` is the library size.
   int listBooks(int page, int pageSize, Book* out, int max, int& total, String& error);
@@ -37,8 +39,8 @@ class BookOrbit {
  private:
   int listBooksOnce(int page, int pageSize, Book* out, int max, int& total, String& error);
   bool fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error);
-  bool fetchWidgetsOnce(const char* const* types, int count, String& json, String& error);
   bool fetchThumbnailOnce(long bookId, const String& path, String& error);
+  bool fetchWidgetsOnce(const char* const* types, int count, String& json, String& error);
   bool postSessionOnce(long fileId, const String& body, bool& rejected, String& error);
   bool postProgressOnce(long fileId, float percentage, String& error);
   bool getProgressOnce(long fileId, float& percentage, String& error);
