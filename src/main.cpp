@@ -622,8 +622,6 @@ static void setPet(int index) {
   SdMan.writeFile(kPetFile, String(petIndex));
 }
 
-static void nextPet() { setPet((petIndex + 1) % pets::kCount); }  // OK on the Home companion card
-
 // Same rules as the Android app and the KOReader plugin: one pose for the current situation.
 static pets::Pose petPose(int hour, bool finishedToday) {
   const int streak = stats.streakDays, longest = stats.longest;
@@ -679,7 +677,6 @@ static void drawPet(int x, int y, bool sel) {
   gfx::blit1bit(x + 8, y + 8, pets::kSprites[petIndex][pose], 64, 64);
   label(x + 84, y + 6, line1.c_str(), sel);
   if (line2.length()) label(x + 84, y + 30, line2.c_str(), sel);
-  if (sel) label(x + 84, y + 52, (String(pets::kNames[petIndex]) + " - OK for the next one").c_str(), sel);
 }
 
 // The stats panel under the Home menu: y from 146 down to 700.
@@ -707,7 +704,7 @@ static void drawStats() {
     label(kMargin + kFull - 62, y + 62, buf, sel);
     y += 102;
   }
-  drawPet(kMargin, y, homeSel == 2);
+  drawPet(kMargin, y, false);  // display only; the companion is chosen in Settings
   y += 86;
   if (stats.streak) {
     card(kMargin, y, kHalf, 124, "Reading streak");
@@ -849,7 +846,6 @@ static void openPicker(int kind) {
   pickerSel = pickerCurrent();
   pickerTop = max(0, min(pickerSel - kPickerRows / 2, pickerCount() - kPickerRows));
   screen = Screen::Picker;
-  halfNext = true;
 }
 
 static void drawPicker(bool full) {
@@ -1330,24 +1326,19 @@ void loop() {
     } else if (pressed(InputManager::BTN_RIGHT)) {
       screen = Screen::Settings;
       settingsSel = 0;
-      halfNext = true;
-      showList(true);
-    } else if (pressed(InputManager::BTN_DOWN) && homeSel < 2) {
-      homeSel = (homeSel == 0 && !stats.readingNow) ? 2 : homeSel + 1;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP) && homeSel > 0) {
-      homeSel = (homeSel == 2 && !stats.readingNow) ? 0 : homeSel - 1;
+    } else if (pressed(InputManager::BTN_DOWN) && homeSel == 0 && stats.readingNow) {
+      homeSel = 1;
+      showList(false);
+    } else if (pressed(InputManager::BTN_UP) && homeSel == 1) {
+      homeSel = 0;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
-      if (homeSel == 2) {
-        nextPet();
-        showList(false);
-      } else if (homeSel == 1 && stats.readingNow) {
+      if (homeSel == 1 && stats.readingNow) {
         openReadingNow();
       } else {
         screen = Screen::Library;
-        halfNext = true;
-        showList(true);
+        showList(false);
       }
     } else {
       fetchNextCover();  // the Reading now cover
@@ -1360,8 +1351,7 @@ void loop() {
       toggleWifi();
     } else if (backClicked()) {  // leave without changing anything
       screen = Screen::Settings;
-      halfNext = true;
-      showList(true);
+      showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && pickerSel < pickerCount() - 1) {
       pickerSel++;
       if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
@@ -1373,8 +1363,7 @@ void loop() {
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (pickerKind == 0) setPet(pickerSel); else setSleep(kSleepOptions[pickerSel]);
       screen = Screen::Settings;
-      halfNext = true;
-      showList(true);
+      showList(false);
     }
     delay(10);
     return;
@@ -1384,8 +1373,7 @@ void loop() {
       toggleWifi();
     } else if (backClicked()) {
       screen = Screen::Home;
-      halfNext = true;
-      showList(true);
+      showList(false);
     } else if (pressed(InputManager::BTN_DOWN) && settingsSel < 2) {
       settingsSel++;
       showList(false);
@@ -1397,7 +1385,7 @@ void loop() {
         toggleWifi();  // redraws by itself
       } else {
         openPicker(settingsSel == 1 ? 0 : 1);
-        showList(true);
+        showList(false);
       }
     }
     delay(10);
@@ -1414,20 +1402,19 @@ void loop() {
     showList(false);
   } else if (backClicked()) {
     screen = Screen::Home;
-    halfNext = true;
-    showList(true);
+    showList(false);
   } else if (pressed(InputManager::BTN_CONFIRM)) {
     openSelected();
   } else if (pressed(InputManager::BTN_RIGHT) && (page + 1) * kPageSize < bookTotal) {
     if (net == Net::Online) setBusy(true);
     const bool ok = loadPage(page + 1, error);
     busy = false;
-    if (ok) showList(true); else message("Error", error + "\n\nPress any button");
+    if (ok) showList(false); else message("Error", error + "\n\nPress any button");
   } else if (pressed(InputManager::BTN_LEFT) && page > 0) {
     if (net == Net::Online) setBusy(true);
     const bool ok = loadPage(page - 1, error);
     busy = false;
-    if (ok) showList(true); else message("Error", error + "\n\nPress any button");
+    if (ok) showList(false); else message("Error", error + "\n\nPress any button");
   }
   else fetchNextCover();  // idle: fetch covers one at a time (library screen only)
   delay(10);
