@@ -511,7 +511,18 @@ bool openToc(int i) {
 static void drawFooter() {
   State& s = *st;
 
-  constexpr int x0 = 20, len = gfx::W - 40, y = gfx::H - 26;
+  // Roughly how long the rest of the chapter takes: ~1200 characters a minute.
+  const uint32_t chapterChars = s.pages.totalChars(), here = s.pages.charStart(s.page);
+  const int minutes = chapterChars > here ? (int)((chapterChars - here + 1199) / 1200) : 0;
+  char eta[16];
+  if (minutes < 1) snprintf(eta, sizeof(eta), "<1 min"); else snprintf(eta, sizeof(eta), "%d min", minutes);
+  gfx::lendFace(s.ttf ? &s.faces[0] : nullptr);
+  const int etaW = gfx::bigTextWidth(eta, 16);
+  gfx::bigText(gfx::W - 20 - etaW, gfx::H - 38, eta, 16);
+  gfx::lendFace(nullptr);
+
+  constexpr int x0 = 20, y = gfx::H - 26;
+  const int len = gfx::W - 40 - etaW - 14;  // the axis stops short of the time on the right
   gfx::fillRect(x0, y - 1, len, 2, true);
   const int n = (int)s.book.spineCount();
   constexpr int kMaxToc = 256;
