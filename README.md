@@ -46,6 +46,8 @@ Settings live in `/bookorbit.json` on the SD card (see `config.example.json`). T
     .venv/bin/python tools/provision.py PORT SSID WIFI_PASSWORD SERVER USERNAME PASSWORD
 
 ## Build / flash
+**Release image (Xteink X4):** `bookorbit-x4-<version>.bin` from the Releases page is a complete 16 MB layout (bootloader, partitions, app and fonts). Back up the stock firmware first, then: `esptool --chip esp32c3 --port /dev/cu.usbmodemXXXX write-flash 0x0 bookorbit-x4-0.0.1.bin`. Put `config.json` (see `config.example.json`) on the SD card as `/bookorbit.json`.
+
 Flash layout is in `partitions.csv` (7 MB app, 1 MB `fonts` partition). After flashing the firmware once, write the fonts:
 
     tools/flash_fonts.sh /dev/cu.usbmodemXXXX
