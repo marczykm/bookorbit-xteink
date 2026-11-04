@@ -1872,17 +1872,15 @@ static void openReadingNow() {
 }
 
 static void drawSleepScreen() {
-  gfx::loadUiFont();
-  gfx::clear();  // light page, dark text
+  gfx::clear();  // light page
   // The companion, asleep, enlarged three times.
   loadPet();
-  constexpr int kScale = 3, kSize = 64 * kScale, kPetY = 188;
+  constexpr int kScale = 3, kSize = 64 * kScale, kPetY = (gfx::H - kSize) / 2 - 24;  // centered (a little high: most sprites sit low in their square)
   const int petX = (gfx::W - kSize) / 2;
   const uint8_t* sprite = pets::kSprites[petIndex][pets::Sleep];
   for (int y = 0; y < 64; y++)
     for (int x = 0; x < 64; x++)
       if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, kPetY + y * kScale, kScale, kScale, true);
-  gfx::bigTextCentered(gfx::H / 2 + 40, "BookOrbit", 80);
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
