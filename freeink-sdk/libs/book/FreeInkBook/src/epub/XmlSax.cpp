@@ -13,7 +13,9 @@ namespace book {
 
 namespace {
 
-constexpr uint32_t kParseChunk = 2048;
+// BookOrbit patch: 1 KB (was 2 KB) halves expat's input buffer, which grows by doubling on the heap; with 2 KB the X3's
+// reader (4 KB less heap than the X4) ran out mid-chapter.
+constexpr uint32_t kParseChunk = 1024;
 
 void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   static_cast<XmlHandler*>(userData)->onStartElement(name, atts);

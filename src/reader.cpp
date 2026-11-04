@@ -29,9 +29,13 @@ constexpr size_t kIndexArena = 4 * 1024;     // page index of the open chapter
 constexpr size_t kSheetArena = 6 * 1024;     // book CSS
 constexpr uint32_t kFontFingerprintBitmap = 0xB00C0001;  // built-in ASCII font
 constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the built-in font pack; bump when it changes
-// Glyph caches: regular, bold, italic. The glyphs are kept at 4 bits; the regular face has 256 slots (a page with its header and
-// footer uses ~110 regular glyphs), the others the default 64.
+// Glyph caches: regular, bold, italic. The glyphs are kept at 4 bits; the regular face has 256 glyph and 128 advance slots
+// (a page with its header and footer uses ~110 regular glyphs), bold and italic (a few words here and there) 32 of each.
 constexpr size_t kFaceArena[3] = {18 * 1024, 6 * 1024, 6 * 1024};
+// The X3's frame buffer is 4 KB bigger, which left the chapter layout's XML parser short of heap (a text size change
+// failed); its bold and italic caches give that back.
+constexpr size_t kFaceArenaX3[3] = {18 * 1024, 4 * 1024, 4 * 1024};
+static size_t faceArenaSize(int style) { return display.isX3Mode() ? kFaceArenaX3[style] : kFaceArena[style]; }
 
 constexpr const char* kFontSizeFile = "/BookOrbit/.fontsize";
 constexpr const char* kMarginFile = "/BookOrbit/.margin";
@@ -222,9 +226,10 @@ bool loadFonts(State& s) {
     memcpy(&length, pack + 16 + 12 * i, 4);
     if (style > 2 || offset + length > packSize) continue;  // bold-italic has no cache budget; the chain falls back
     if (!s.faceBuf[style]) { Serial.printf("fonts: no heap for face %u\n", (unsigned)style); return false; }
-    s.faceArena[style].init(s.faceBuf[style], kFaceArena[style]);
+    s.faceArena[style].init(s.faceBuf[style], faceArenaSize(style));
     s.faces[style].setPackedGlyphs(true);
-    if (style == 0) s.faces[style].setGlyphSlots(256);
+    s.faces[style].setGlyphSlots(style == 0 ? 256 : 32);
+    s.faces[style].setAdvanceSlots(style == 0 ? 128 : 32);
     if (!s.faces[style].init(pack + offset, length, s.faceArena[style])) { Serial.printf("fonts: face %u init failed\n", (unsigned)style); return false; }
     s.faces[style].setEmSizing(true);
     if (!s.fonts.add(&s.faces[style], static_cast<uint8_t>(style))) return false;
@@ -286,7 +291,7 @@ bool open(const char* epubPath, String& error, float serverPercent) {
   State& s = *st;
   s.scratchBuf = (uint8_t*)malloc(kScratchArena);  // biggest first, while the heap is least fragmented
   s.bookBuf = (uint8_t*)malloc(kBookArena);  // fits the 18 KB left beside the scratch block
-  for (int i = 0; i < 3; i++) s.faceBuf[i] = (uint8_t*)malloc(kFaceArena[i]);  // before the small ones fragment the heap
+  for (int i = 0; i < 3; i++) s.faceBuf[i] = (uint8_t*)malloc(faceArenaSize(i));  // before the small ones fragment the heap
   s.indexBuf = (uint8_t*)malloc(kIndexArena);
   s.sheetBuf = (uint8_t*)malloc(kSheetArena);
   if (!s.bookBuf || !s.scratchBuf || !s.indexBuf || !s.sheetBuf) {
@@ -443,7 +448,7 @@ void draw(bool full) {
   s.scratch.release(mark);
   drawHeader();
   drawFooter();
-  Serial.printf("rendered in %u ms\n", (unsigned)(millis() - drawStart));
+  Serial.printf("rendered in %u ms, free heap %u\n", (unsigned)(millis() - drawStart), (unsigned)ESP.getFreeHeap());
   // "full" is the periodic ghosting cleanup. A half refresh does it with far less flashing than a full one (1.7 s vs 3.8 s).
   gfx::flush(full ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
 }

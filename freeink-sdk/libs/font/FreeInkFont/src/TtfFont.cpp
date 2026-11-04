@@ -47,10 +47,10 @@ bool TtfFont::init(const uint8_t* data, uint32_t len, Arena& glyphArena) {
   unitsLineGap_ = gap;
 
   glyphArena_ = &glyphArena;
-  advances_ = glyphArena.allocArray<AdvanceSlot>(kAdvanceSlots);
+  advances_ = glyphArena.allocArray<AdvanceSlot>(advanceSlotCount_);
   glyphs_ = glyphArena.allocArray<GlyphSlot>(glyphSlotCount_);
   if (advances_ == nullptr || glyphs_ == nullptr) return false;
-  for (uint32_t i = 0; i < kAdvanceSlots; ++i) advances_[i] = AdvanceSlot{};
+  for (uint32_t i = 0; i < advanceSlotCount_; ++i) advances_[i] = AdvanceSlot{};
   for (uint32_t i = 0; i < glyphSlotCount_; ++i) glyphs_[i] = GlyphSlot{};
   glyphBase_ = glyphArena.mark();
 
@@ -64,7 +64,7 @@ float TtfFont::scaleFor(uint16_t sizePx) const {
 }
 
 int32_t TtfFont::glyphIndexFor(uint32_t codepoint) const {
-  const uint32_t slot = codepoint % kAdvanceSlots;
+  const uint32_t slot = codepoint % advanceSlotCount_;
   if (advances_[slot].key != codepoint) {
     const int glyph = stbtt_FindGlyphIndex(fontOf(fontInfo_), static_cast<int>(codepoint));
     int adv = 0;
@@ -87,7 +87,7 @@ int16_t TtfFont::advance(uint32_t codepoint, uint16_t sizePx, uint8_t styleFlags
   (void)styleFlags;
   if (!ready_) return 0;
   glyphIndexFor(codepoint);  // fills the slot
-  const AdvanceSlot& slot = advances_[codepoint % kAdvanceSlots];
+  const AdvanceSlot& slot = advances_[codepoint % advanceSlotCount_];
   const float scaled = slot.unscaledAdvance * scaleFor(sizePx);
   return static_cast<int16_t>(scaled + 0.5f);
 }
@@ -107,7 +107,7 @@ int16_t TtfFont::kerning(uint32_t left, uint32_t right, uint16_t sizePx, uint8_t
   (void)styleFlags;
   if (!ready_) return 0;
   const int32_t g1 = glyphIndexFor(left);
-  const AdvanceSlot leftSlot = advances_[left % kAdvanceSlots];
+  const AdvanceSlot leftSlot = advances_[left % advanceSlotCount_];
   const int32_t g2 = glyphIndexFor(right);
   // glyphIndexFor(right) may have evicted the left slot on collision; use
   // the copy taken above.
@@ -194,7 +194,7 @@ const GlyphBitmap* TtfFont::rasterize(uint32_t codepoint, uint16_t sizePx) {
   // glyphIndexFor() above already read hmtx for this codepoint and cached the
   // unscaled advance. flushGlyphs() only clears glyphs_, so the advance slot is
   // still the one just filled even if the arena recycled mid-rasterize.
-  const int32_t adv = advances_[codepoint % kAdvanceSlots].unscaledAdvance;
+  const int32_t adv = advances_[codepoint % advanceSlotCount_].unscaledAdvance;
 
   slot->key = key;
   slot->glyph.pixels = pixels;
