@@ -3,3 +3,5 @@
 .cache/
 backup/
 build/
+sim/sdcard/
+sim/screenshots/

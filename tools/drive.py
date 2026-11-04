@@ -5,7 +5,10 @@ import os, re, subprocess, sys, time, serial
 port, outdir, steps = sys.argv[1], sys.argv[2], sys.argv[3:]
 os.makedirs(outdir, exist_ok=True)
 s = serial.Serial(port, 115200, timeout=0.2)
-s.dtr = False; s.rts = True; time.sleep(.1); s.rts = False
+try:
+    s.dtr = False; s.rts = True; time.sleep(.1); s.rts = False
+except OSError:  # the simulator's pseudo-terminal has no reset line (press R in its window to reset)
+    pass
 log = open(os.path.join(outdir, "log.txt"), "w")
 buf = ""; shots = 0
 

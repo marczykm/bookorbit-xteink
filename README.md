@@ -68,6 +68,9 @@ Back up the stock firmware first: `esptool read_flash 0 0x1000000 backup/stock-x
 Environment `xteink_x4c` is for the ESP32-S3 X4 Classic (untested).
 
 ## Testing without touching the device
+The desktop simulator (SDL2 window, macOS/Linux) runs the same firmware without a device: `pio run -e simulator` and
+`.pio/build/simulator/program [--x3]`. See [sim/README.md](sim/README.md).
+
 `tools/drive.py PORT OUTDIR STEP...` resets the device, injects button presses over serial (`o` OK, `d`/`u` down/up,
 `n`/`p` next/previous page, `b` back) and saves screenshots (`shot`) as PNG. `OPEN:/path.epub` opens any EPUB on the card.
 `tools/mock_server` is `../bookorbit-android/tools/mock_server.py` (port 3000, demo/demo).
