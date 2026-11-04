@@ -62,11 +62,12 @@ int advanceOf(uint32_t cp) { return ttfOn ? face->advance(cp, kTtfSize, 0) : gly
 void begin(EInkDisplay* display) { disp = display; }
 
 bool loadUiFont() {
+  if (ttfOnOwn) return true;  // already loaded
   const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "fonts");
   if (!part) return false;
   const void* mem = nullptr;
   esp_partition_mmap_handle_t handle;
-  if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mem, &handle) != ESP_OK) return false;
+  if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mem, &handle) != ESP_OK) { Serial.println("ui font: mmap failed"); return false; }
   const uint8_t* pack = static_cast<const uint8_t*>(mem);
   uint32_t count;
   memcpy(&count, pack + 4, 4);
@@ -76,9 +77,9 @@ bool loadUiFont() {
   memcpy(&offset, pack + 12, 4);
   memcpy(&length, pack + 16, 4);
   uint8_t* buf = style == 0 && offset + length <= part->size ? static_cast<uint8_t*>(malloc(kTtfArena)) : nullptr;
-  if (!buf) return false;
+  if (!buf) { Serial.printf("ui font: no heap for %u bytes (free %u, largest %u)\n", (unsigned)kTtfArena, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap()); return false; }
   ttfArena.init(buf, kTtfArena);
-  if (!ttf.init(pack + offset, length, ttfArena)) return false;
+  if (!ttf.init(pack + offset, length, ttfArena)) { Serial.println("ui font: init failed"); return false; }
   ttf.setEmSizing(true);
   ttfOn = true;
   ttfOnOwn = true;

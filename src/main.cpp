@@ -261,6 +261,8 @@ bool firstDraw = true;  // the first draw after power-on / wake / returning from
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
 enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline = the radio is off, which is the normal idle state
 constexpr uint32_t kNetKeepMs = 2 * 60 * 1000;  // how long Wi-Fi stays on after the last request
+bool powerArmed = false;  // a click on Power sleeps, but only once the button has been seen released since boot (the press that woke the device is dropped)
+bool sleepPending = false;  // Power was clicked during a long operation: the sleep screen is already up, sleep follows
 uint32_t lastNetUse = 0;  // when the server was last talked to; the radio goes off kNetKeepMs later
 int netDepth = 0;         // requests in flight
 bool syncFailed = false;  // the last attempt to reach the server failed
@@ -269,9 +271,9 @@ uint32_t netStart = 0;
 String offlineReason;
 
 [[noreturn]] static void goToSleep();
-static void drawSleepScreen();
+static void drawSleepScreen(int sync = 0);  // sync: 1 = draw the "syncing" icon; 0 = the finished screen (a crossed-out icon while unsynced)
 
-// Test hook: single serial characters act as button presses (o=OK d=down u=up n=right p=left b=back).
+// Test hook: single serial characters act as button presses (o=OK d=down u=up n=right p=left b=back z=power).
 static int injected = -1;
 
 // Buttons are sampled by a small background task, so a tap is never missed while the main loop is busy (rendering a page,
@@ -317,6 +319,8 @@ static void handleSerial() {
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
+      if (line == "CLOSEMOCK") { extern void testCloseMock(); testCloseMock(); }  // test hook: the screen shown while leaving a book
+      if (line == "SLEEPSYNC") drawSleepScreen(1);   // test hook: the mock shown while the sync before sleep runs
       if (line.startsWith("CFG:")) {
         const bool ok = SdMan.writeFile("/bookorbit.json", line.substring(4));
         Serial.println(ok ? "config saved, restarting" : "config write failed");
@@ -328,9 +332,9 @@ static void handleSerial() {
       line = "";
     } else if (line.length() == 0 && c == 'F') {
       gfx::dumpFramebuffer();
-    } else if (line.length() == 0 && strchr("odunpb", c)) {
+    } else if (line.length() == 0 && strchr("odunpbz", c)) {
       injected = c == 'o' ? InputManager::BTN_CONFIRM : c == 'd' ? InputManager::BTN_DOWN : c == 'u' ? InputManager::BTN_UP
-               : c == 'n' ? InputManager::BTN_RIGHT : c == 'p' ? InputManager::BTN_LEFT : InputManager::BTN_BACK;
+               : c == 'n' ? InputManager::BTN_RIGHT : c == 'p' ? InputManager::BTN_LEFT : c == 'z' ? InputManager::BTN_POWER : InputManager::BTN_BACK;
     } else if (line.length() < 512) {
       line += c;
     }
@@ -1899,7 +1903,7 @@ static int wrapBig(const char* text, int maxW, int size, char* l1, char* l2) {
   return l2[0] ? 2 : 1;
 }
 
-static void drawSleepScreen() {
+static void drawSleepScreen(int sync) {
   gfx::clear();  // light page
   if (!stats.any()) loadStatsCache();  // reading mode starts without the statistics
   loadPet();
@@ -1963,6 +1967,8 @@ static void drawSleepScreen() {
     bar(textX, ty, textW - pctW - 12, 14, pct / 100.0f);
     gfx::bigText(textX + textW - pctW, ty - 6, buf, 26);
   }
+  if (sync == 1) drawSyncIcon(gfx::W - 36, 36, 1.3f, false);        // a sync is running: the arrows
+  else if (unsynced()) drawSyncIcon(gfx::W - 36, 36, 1.3f, true);  // something is still waiting to be sent: the arrows crossed out
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
@@ -1996,25 +2002,14 @@ static bool initApi(String& error) {
 }
 
 // Before sleeping: send whatever is waiting (reading progress, sessions) and refresh the statistics, so the other devices and the
-// web reader are up to date while this one is off. Nothing happens when there is nothing to send.
+// web reader are up to date while this one is off. goToSleep() calls it only when something is waiting, behind the sleep screen.
 static void syncBeforeSleep() {
   String error;
-  if (!initApi(error) || !unsynced()) return;
-  syncModal("Syncing", "Before going to sleep...");
-  if (!goOnline(error, false)) {
-    syncModal("Not synced", "Will retry at the next start");
-    delay(1500);
-    return;
-  }
+  if (!goOnline(error, false)) return;  // stays unsynced: the sleep screen then shows the crossed-out sync icon
   flushProgress();
   flushSessions();
   refreshStats();
-  if (stats.readingNow && stats.nowId && !cover::cached(stats.nowId)) {  // the sleep screen shows it: have it ready
-    syncModal("Syncing", "Fetching the cover...");
-    ensureReadingCover();
-  }
-  syncModal("Synced", "Going to sleep");
-  delay(500);
+  if (stats.readingNow && stats.nowId && !cover::cached(stats.nowId)) ensureReadingCover();  // the sleep screen shows it: have it ready
 }
 
 // Draws the sleep screen and deep-sleeps; the Power button wakes the device (a fresh boot).
@@ -2031,7 +2026,14 @@ static void syncBeforeSleep() {
     readServerPercent = -1;
     // readPath and readFileId are still set from opening this book
   }
-  syncBeforeSleep();
+  String initError;
+  if (initApi(initError) && unsynced()) {  // show the sleep screen with a sync icon first (unless it is already up), then really sync
+    if (!sleepPending) {
+      drawSleepScreen(1);
+      gfx::waitIdle();
+    }
+    syncBeforeSleep();
+  }
   if (WiFi.getMode() != WIFI_OFF) WiFi.mode(WIFI_OFF);
   drawSleepScreen();
   gfx::waitIdle();
@@ -2039,12 +2041,36 @@ static void syncBeforeSleep() {
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
 
+// Draws the screen the book was opened from (Home or the library list, from the cached data) at once, so leaving a book feels
+// instant; the restart below then rebuilds the same screen and starts the sync.
+static void showDestinationMock() {
+  gfx::loadUiFont();  // reading mode starts without it
+  loadStatsCache();
+  loadPet();
+  screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
+  if (screen == Screen::Library) {
+    if (openScope >= 1 && openScope <= 3) {
+      src = (Scope)openScope;
+      srcId = openScopeId;
+      strlcpy(srcName, openScopeName, sizeof(srcName));
+    }
+    loadCachedPage(0);
+  }
+  homeSel = 0;
+  drawScreen(false);  // a quick refresh: it only has to change what the page showed
+  gfx::waitIdle();
+}
+
+void testCloseMock() {  // test hook: as closeBook() up to the restart
+  reader::close();
+  showDestinationMock();
+}
+
 static void closeBook() {
-  reader::uiFont(true);  // the reader's own face draws the modal (the UI font isn't loaded while reading)
-  syncModal("Closing book", "Saving your position...");
   sessionTick();
   checkpoint();
-  reader::close();
+  reader::close();  // saves the position and frees the heap
+  showDestinationMock();
   readFileId = 0;
   ESP.restart();  // back to where the book was opened from (see openBook)
 }
@@ -2312,6 +2338,19 @@ void setup() {
   showList(true);
 }
 
+// Called between the steps of a long operation (the start-up sync): a Power click is answered at once by drawing the sleep screen
+// (with the sync icon); the operation finishes its essential steps and loop() then really puts the device to sleep.
+static void pollSleep() {
+  if (sleepPending) return;
+  handleSerial();  // (test hook: a 'z' sent over serial acts as a Power click)
+  if (!input.isPowerButtonPhysicallyPressed()) powerArmed = true;
+  if (pressed(InputManager::BTN_POWER) && powerArmed) {
+    sleepPending = true;
+    drawSleepScreen(1);
+    gfx::waitIdle();
+  }
+}
+
 // Runs from loop() while the library is up: finishes Wi-Fi, sign-in and the list refresh without blocking the buttons for long.
 static void backgroundSync() {
   if (net != Net::Connecting) return;
@@ -2331,13 +2370,15 @@ static void backgroundSync() {
   const int keep = selected, keepPage = page;
   setBusy(true);
   if (api.login(config.username, config.password, error)) {
-    flushProgress();
+    pollSleep();
+    flushProgress();  // what must be sent is always sent, even when the device is about to sleep
     flushSessions();
     syncFailed = false;
     net = Net::Online;
-    refreshStats();
-    ensureReadingCover();
-    if (loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
+    pollSleep();
+    if (!sleepPending) { refreshStats(); pollSleep(); }
+    if (!sleepPending) { ensureReadingCover(); pollSleep(); }
+    if (!sleepPending && loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
     syncFailed = true;
@@ -2412,10 +2453,9 @@ void loop() {
   if (millis() - lastActivity > sleepAfterMs()) goToSleep();
   // A click on Power sleeps, but only once the button has been seen released since boot, so the press
   // that woke the device doesn't put it straight back to sleep.
-  static bool powerArmed = false;
   if (!input.isPowerButtonPhysicallyPressed()) powerArmed = true;
   const bool powerClicked = pressed(InputManager::BTN_POWER);  // consumed even while unarmed, so the waking press is dropped
-  if (powerArmed && powerClicked) goToSleep();
+  if ((powerArmed && powerClicked) || sleepPending) goToSleep();
 
   if (reader::isOpen()) {
     readerLoop();
