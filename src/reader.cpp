@@ -429,7 +429,7 @@ static void drawHeader() {
 
 static void drawFooter();
 
-void draw(bool full) {
+void render() {
   if (!isOpen()) return;
   State& s = *st;
   Serial.printf("draw chapter %d page %u/%u\n", s.spine, (unsigned)s.page, (unsigned)s.pages.pageCount());
@@ -449,6 +449,11 @@ void draw(bool full) {
   drawHeader();
   drawFooter();
   Serial.printf("rendered in %u ms, free heap %u\n", (unsigned)(millis() - drawStart), (unsigned)ESP.getFreeHeap());
+}
+
+void draw(bool full) {
+  if (!isOpen()) return;
+  render();
   // "full" is the periodic ghosting cleanup. A half refresh does it with far less flashing than a full one (1.7 s vs 3.8 s).
   gfx::flush(full ? EInkDisplay::HALF_REFRESH : EInkDisplay::FAST_REFRESH);
 }

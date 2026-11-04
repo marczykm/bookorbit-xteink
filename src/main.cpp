@@ -13,10 +13,15 @@
 #include "cover.h"
 #include "pets.h"
 #include "gfx.h"
+#include "outbox.h"
+#include "stats.h"
 #include "updater.h"
 #include "reader.h"
+#include "ui.h"
 #include <ArduinoJson.h>
 #include <XteinkDetect.h>
+
+using namespace ui;  // the screens below are built from its shapes and icons
 
 #if FREEINK_DEVICE_X4CLASSIC
 // X4 Classic display pins (ESP32-S3)
@@ -46,61 +51,6 @@ RTC_NOINIT_ATTR char openScopeName[48];
 RTC_NOINIT_ATTR uint32_t openLibraryMagic;  // set when closing a book so the device returns to the library, not Home
 RTC_NOINIT_ATTR long readFileId;  // server file id of the open book, 0 when unknown
 
-// Progress waits in this file ("<fileId> <percent>" per line) until the device next has Wi-Fi. The furthest position is the
-// source of truth: a book's entry only ever moves forward, and the server is only told when it is behind.
-
-constexpr const char* kOutbox = "/BookOrbit/.progress";
-
-static void queueProgress(long fileId, float percent) {
-  if (!fileId) return;
-  String out;
-  String old = SdMan.exists(kOutbox) ? SdMan.readFile(kOutbox) : String();
-  int start = 0;
-  while (start < (int)old.length()) {  // keep the other books' entries
-    int nl = old.indexOf('\n', start);
-    if (nl < 0) nl = old.length();
-    const String line = old.substring(start, nl);
-    if (line.length() && atol(line.c_str()) != fileId) {
-      out += line + "\n";
-    } else if (line.length()) {  // this book was already waiting: never move it backwards
-      const int sp = line.indexOf(' ');
-      if (sp > 0) percent = max(percent, line.substring(sp + 1).toFloat());
-    }
-    start = nl + 1;
-  }
-  out += String(fileId) + " " + String(percent, 1) + "\n";
-  SdMan.ensureDirectoryExists("/BookOrbit");
-  SdMan.writeFile(kOutbox, out);
-}
-
-static void flushProgress() {
-  if (!SdMan.exists(kOutbox)) return;
-  const String old = SdMan.readFile(kOutbox);
-  String left;
-  int start = 0;
-  while (start < (int)old.length()) {
-    int nl = old.indexOf('\n', start);
-    if (nl < 0) nl = old.length();
-    const String line = old.substring(start, nl);
-    start = nl + 1;
-    const long id = atol(line.c_str());
-    const int sp = line.indexOf(' ');
-    if (!id || sp < 0) continue;
-    String error;
-    const float local = line.substring(sp + 1).toFloat();
-    float server = 0;
-    if (api.getProgress(id, server, error) && server >= local) {  // the server is already as far or further: keep it
-      Serial.printf("progress kept: file %ld is at %.1f%% on the server (device %.1f%%)\n", id, server, local);
-    } else if (api.postProgress(id, local, error)) {
-      Serial.printf("progress synced: file %ld at %s%%\n", id, line.substring(sp + 1).c_str());
-    } else {
-      Serial.printf("progress sync failed: %s\n", error.c_str());
-      left += line + "\n";
-    }
-  }
-  if (left.isEmpty()) SdMan.remove(kOutbox); else SdMan.writeFile(kOutbox, left);
-}
-
 // No button for this long: show the sleep screen and deep-sleep. Chosen in Settings, saved on the SD card.
 constexpr int kSleepOptions[] = {1, 2, 5, 10, 15, 30};  // minutes
 constexpr const char* kSleepFile = "/BookOrbit/.sleep";
@@ -110,8 +60,7 @@ uint32_t lastActivity = 0;
 
 // ---- Reading sessions (statistics) -----------------------------------------------------------------------------
 // The reader has no network, so a session is written to the SD card at checkpoints (every 10 page turns, on Back and
-// before sleep) and uploaded with the progress at the next library start. Re-saving a session replaces its earlier copy.
-constexpr const char* kSessionOutbox = "/BookOrbit/.sessions";
+// before sleep) and uploaded later (see outbox.h). Re-saving a session replaces its earlier copy.
 constexpr uint32_t kIdleLimitMs = 2 * 60 * 1000;  // a pause longer than this counts as 2 minutes of reading
 constexpr int kCheckpointTurns = 10;
 constexpr int kCleanupTurns = 15;  // page turns between ghosting-cleanup refreshes while reading
@@ -167,25 +116,10 @@ static void sessionTick() {
   sess.lastTick = now;
 }
 
-static void queueSession(long fileId, const String& line, const char* id) {
-  String out, old = SdMan.exists(kSessionOutbox) ? SdMan.readFile(kSessionOutbox) : String();
-  int start = 0;
-  while (start < (int)old.length()) {  // drop the earlier copy of this session
-    int nl = old.indexOf('\n', start);
-    if (nl < 0) nl = old.length();
-    const String l = old.substring(start, nl);
-    if (l.length() && l.indexOf(id) < 0) out += l + "\n";
-    start = nl + 1;
-  }
-  out += line + "\n";
-  SdMan.ensureDirectoryExists("/BookOrbit");
-  SdMan.writeFile(kSessionOutbox, out);
-}
-
 // Saves what is known so far: the position for progress sync, and the session for the statistics.
 static void checkpoint() {
   const float percent = reader::progressPercent();
-  queueProgress(readFileId, percent);
+  outbox::queueProgress(readFileId, percent);
   if (!sess.valid) return;
   const uint32_t active = sess.activeMs + min<uint32_t>(millis() - sess.lastTick, kIdleLimitMs);
   if (active < 5000) return;
@@ -202,36 +136,8 @@ static void checkpoint() {
   o["source"] = kSessionSource;
   String line;
   serializeJson(doc, line);
-  queueSession(readFileId, line, sess.id);
+  outbox::queueSession(line, sess.id);
   Serial.printf("session checkpoint: %us, %.1f%% -> %.1f%%\n", (unsigned)(active / 1000), sess.startPercent, percent);
-}
-
-static void flushSessions() {
-  if (!SdMan.exists(kSessionOutbox)) return;
-  const String old = SdMan.readFile(kSessionOutbox);
-  String left;
-  int start = 0;
-  while (start < (int)old.length()) {
-    int nl = old.indexOf('\n', start);
-    if (nl < 0) nl = old.length();
-    const String line = old.substring(start, nl);
-    start = nl + 1;
-    if (line.isEmpty()) continue;
-    JsonDocument doc;
-    if (deserializeJson(doc, line)) continue;  // unreadable: drop it
-    String body, error;
-    serializeJson(doc["session"], body);
-    bool rejected = false;
-    if (api.postSession(doc["fileId"] | 0L, body, rejected, error)) {
-      Serial.printf("session synced: file %ld, %us\n", (long)(doc["fileId"] | 0L), (unsigned)(doc["session"]["durationSeconds"] | 0));
-    } else if (rejected) {
-      Serial.printf("session rejected, dropped: %s\n", error.c_str());
-    } else {
-      Serial.printf("session sync failed: %s\n", error.c_str());
-      left += line + "\n";
-    }
-  }
-  if (left.isEmpty()) SdMan.remove(kSessionOutbox); else SdMan.writeFile(kSessionOutbox, left);
 }
 
 constexpr int kPageSize = 9;
@@ -263,6 +169,14 @@ int setupSel = 0;   // step 2: 0 server, 1 username, 2 password, 3 sign in
 int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer, update
 int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
+
+// Sends a drawn screen to the panel: a quick refresh for changes within a screen; a new screen (full) gets the half refresh
+// the first time and after halfNext was set, else a full one.
+static void present(bool full) {
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
 
 // The library appears at once from the cache; Wi-Fi and sign-in finish in the background (see backgroundSync()).
 enum class Net { Connecting, Online, Offline } net = Net::Offline;  // Offline = the radio is off, which is the normal idle state
@@ -324,7 +238,6 @@ static void handleSerial() {
       if (line == "SLEEP") goToSleep();
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
-      if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
       if (line == "SETUP2" && setupMode) { setupStep = 1; screen = Screen::Setup; showList(false); }  // test hook: the server step
       if (line.startsWith("MODAL:")) gfx::modal("Update failed", line.substring(6).c_str());  // test hook: a notice box with this text
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
@@ -352,17 +265,10 @@ static void handleSerial() {
 
 // ---- Screens -------------------------------------------------------------------------------------------------
 
-// Set while the device is talking to the BookOrbit server (no longer drawn; the "Syncing" modal covers long waits).
-static bool busy = false;
 // Back from a book (leaving one restarts the device): the start-up sync also sends the reading progress just made. After
 // waking from sleep it doesn't (progress goes before sleep and when a book is opened).
 static bool fromBook = false;
 
-static void setBusy(bool on) { busy = on; }
-
-void testBusyDot() { setBusy(true); busy = false; }  // test hook: show the dot without a request
-
-static void drawSyncIcon(int cx, int cy, float f, bool slash);
 static bool unsynced();
 
 static void header(const char* title) {
@@ -390,154 +296,40 @@ static void message(const char* title, const String& body, bool full = true) {
   gfx::flush(full ? EInkDisplay::FULL_REFRESH : EInkDisplay::FAST_REFRESH);
 }
 
-// ---- Button hints: icons for the buttons instead of text codes -------------------------------------------------
-
-enum class Dir { Up, Down, Left, Right };
-
-static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high pointing arrow
-  for (int i = 0; i < 13; i++) {
-    const int half = i / 2;  // i = 0 is the tip, widening to the base
-    switch (d) {
-      case Dir::Up: gfx::fillRect(cx - half, cy - 6 + i, half * 2 + 1, 1, black); break;
-      case Dir::Down: gfx::fillRect(cx - half, cy + 6 - i, half * 2 + 1, 1, black); break;
-      case Dir::Left: gfx::fillRect(cx - 6 + i, cy - half, 1, half * 2 + 1, black); break;
-      case Dir::Right: gfx::fillRect(cx + 6 - i, cy - half, 1, half * 2 + 1, black); break;
-    }
-  }
+// A password as shown in a row: one star per character, at most ten.
+static String masked(const String& password) {
+  String stars;
+  for (size_t k = 0; k < password.length() && k < 10; k++) stars += '*';
+  return stars;
 }
 
-// Hints sit directly above the four buttons along the bottom edge: Back, OK, Left, Right.
-// The four front buttons' positions under a 480 px wide screen, scaled to the panel's width.
-constexpr int kButtonX480[4] = {25, 130, 245, 350}, kButtonW480 = 106;
-#define kButtonX (buttonX())
-#define kButtonW (kButtonW480 * gfx::W / 480)
-static const int* buttonX() {
-  static int x[4];
-  for (int i = 0; i < 4; i++) x[i] = kButtonX480[i] * gfx::W / 480;
-  return x;
+// A full-width row with a name on the left and its value on the right (Settings, setup).
+static void valueRow(int y, const char* name, const String& value, bool sel) {
+  if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, 52, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, 52);
+  gfx::text(kMargin + 14, y + 11, name, !sel);
+  const int valueX = gfx::W - kMargin - 14;
+  const char* v = gfx::ellipsize(value.c_str(), valueX - (kMargin + 14 + gfx::textWidth(name)) - 16);
+  gfx::text(valueX - gfx::textWidth(v), y + 11, v, !sel);
 }
 
-// Two circular arrows (sync), about 28 px across and centered on (cx, cy).
-// Icons drawn with float math (slow in software: the C3 has no FPU) are worked out once into a 1-bit mask around their
-// centre and stamped from then on. A mask is keyed by the icon and its scale.
-struct IconMask {
-  int key = -1, r = 0;  // the mask covers -r..r around the centre
-  uint8_t* bits = nullptr;
-};
-static IconMask iconMasks[6];
-
-template <typename Draw>
-static void stampIcon(int key, int r, int cx, int cy, Draw draw) {
-  IconMask* m = nullptr;
-  for (auto& k : iconMasks) if (k.key == key) { m = &k; break; }
-  const int side = 2 * r + 1, stride = (side + 7) / 8;
-  if (!m) {
-    for (auto& k : iconMasks) if (k.key < 0) { m = &k; break; }
-    uint8_t* bits = m ? static_cast<uint8_t*>(calloc(side, stride)) : nullptr;
-    if (!bits) {  // no room to keep it: draw it directly
-      draw([&](int dx, int dy) { gfx::fillRect(cx + dx, cy + dy, 1, 1, true); });
-      return;
-    }
-    draw([&](int dx, int dy) {
-      if (dx >= -r && dx <= r && dy >= -r && dy <= r) bits[(dy + r) * stride + (dx + r) / 8] |= 0x80 >> ((dx + r) & 7);
-    });
-    m->key = key;
-    m->r = r;
-    m->bits = bits;
-  }
-  for (int y = 0; y < side; y++)
-    for (int x = 0; x < side; x++)
-      if (m->bits[y * stride + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(cx - r + x, cy - r + y, 1, 1, true);
+// A section heading: the name in capitals, then a rule to the edge.
+static void heading(int y, const char* name) {
+  String h = name;
+  h.toUpperCase();
+  gfx::text(kMargin, y + 2, h.c_str());
+  gfx::text(kMargin + 1, y + 2, h.c_str());  // a second pass makes it bolder
+  const int w = gfx::textWidth(h.c_str()) + 10;
+  gfx::fillRect(kMargin + w, y + 16, gfx::W - 2 * kMargin - w, 2, true);
 }
 
-static void drawSyncIcon(int cx, int cy, float f, bool slash) {
-  stampIcon((int)(f * 100), (int)(16 * f) + 2, cx, cy, [f](auto plot) {
-    constexpr float kPi = 3.14159265f;
-    const float kR = 9.5f * f, thick = max(1.2f, 1.8f * f);
-    const int reach = (int)(14 * f) + 2;
-    for (int dy = -reach; dy <= reach; dy++)
-      for (int dx = -reach; dx <= reach; dx++) {
-        const float d = sqrtf((float)(dx * dx + dy * dy));
-        if (d < kR - thick || d > kR + thick) continue;
-        float a = atan2f((float)dy, (float)dx) * 180.0f / kPi;  // -180..180, clockwise on screen
-        if (a < 0) a += 360.0f;
-        if ((a > 25 && a < 150) || (a > 205 && a < 330)) plot(dx, dy);
-      }
-    for (int k = 0; k < 2; k++) {  // an arrow head at the end of each arc, pointing clockwise
-      const float a = (k ? 330.0f : 150.0f) * kPi / 180.0f;
-      const float px = kR * cosf(a), py = kR * sinf(a);
-      const float tx = -sinf(a), ty = cosf(a), nx = cosf(a), ny = sinf(a);  // tangent (direction of travel) and radial
-      const float tipX = px + 6 * f * tx, tipY = py + 6 * f * ty;
-      const float b1x = px - 5 * f * nx, b1y = py - 5 * f * ny, b2x = px + 5 * f * nx, b2y = py + 5 * f * ny;
-      const int r2 = (int)(16 * f) + 2;
-      for (int y = -r2; y <= r2; y++)
-        for (int x = -r2; x <= r2; x++) {  // inside the triangle (tip, b1, b2)?
-          const float d1 = (x - b2x) * (tipY - b2y) - (tipX - b2x) * (y - b2y);
-          const float d2 = (x - b1x) * (b2y - b1y) - (b2x - b1x) * (y - b1y);
-          const float d3 = (x - tipX) * (b1y - tipY) - (b1x - tipX) * (y - tipY);
-          if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) plot(x, y);
-        }
-    }
-  });
-  if (slash) {  // crossed out: a diagonal with a white edge so it reads over the arrows
-    const int n = (int)(12 * f);
-    for (int i = -n; i <= n; i++) gfx::fillRect(cx + i - 2, cy + i - 3, 6, 7, false);  // the white edge first...
-    for (int i = -n; i <= n; i++) gfx::fillRect(cx + i, cy + i - 1, 2, 3, true);       // ...then the line on top
-  }
+// A full-width button with a centred label.
+static void button(int y, const char* text, bool sel) {
+  const int w = gfx::W - 2 * kMargin;
+  if (sel) roundRect(kMargin, y, w, 60, 8, true); else frame(kMargin, y, w, 60);
+  gfx::text(kMargin + (w - gfx::textWidth(text)) / 2, y + 15, text, !sel);
 }
 
-static void drawHints(bool back = true, bool ok = true, bool paging = true, bool settings = false, bool sync = false) {
-  const int top = gfx::H - 52, y = gfx::H - 42;
-  gfx::fillRect(0, top, gfx::W, 2, true);
-  const auto center = [](int i, int w) { return kButtonX[i] + (kButtonW - w) / 2; };
-  // Back: a return arrow (shaft out to the right, down, and back left) so it isn't mistaken for the Left arrow.
-  const int bx = center(0, 30), by = y + 6;
-  if (back) {
-    triangle(bx + 6, by, Dir::Left, true);
-    gfx::fillRect(bx + 8, by - 1, 20, 3, true);
-    gfx::fillRect(bx + 26, by - 1, 3, 15, true);
-    gfx::fillRect(bx + 10, by + 11, 19, 3, true);
-  }
-  // OK: a solid tick.
-  const int ox = kButtonX[1] + kButtonW / 2, oy = y + 14;
-  if (ok) {
-    for (int i = 0; i < 7; i++) gfx::fillRect(ox - 13 + i, oy - 1 + i, 4, 4, true);       // short stroke down-right
-    for (int i = 0; i < 15; i++) gfx::fillRect(ox - 7 + i, oy + 5 - i * 17 / 15, 4, 4, true);  // long stroke up-right
-  }
-  if (paging) {
-    triangle(kButtonX[2] + kButtonW / 2, y + 14, Dir::Left, true);
-    triangle(kButtonX[3] + kButtonW / 2, y + 14, Dir::Right, true);
-  }
-  if (sync) drawSyncIcon(kButtonX[2] + kButtonW / 2, y + 14, 1.0f, false);
-  if (settings) {  // a gear above the fourth button
-    const int gx = kButtonX[3] + kButtonW / 2, gy = y + 14;
-    stampIcon(1, 13, gx, gy, [](auto plot) {
-      for (int dy = -13; dy <= 13; dy++)
-        for (int dx = -13; dx <= 13; dx++) {
-          const float d = sqrtf((float)(dx * dx + dy * dy));
-          bool on = d <= 9.0f && d >= 4.5f;  // the ring with its hub hole
-          if (!on && d > 9.0f && d <= 13.0f) {  // eight teeth
-            float a = atan2f((float)dy, (float)dx) * 180.0f / (float)PI;  // -180..180
-            a = fmodf(a + 360.0f + 22.5f, 45.0f);
-            on = a > 11.0f && a < 34.0f;
-          }
-          if (on) plot(dx, dy);
-        }
-    });
-  }
-}
 
-// A small "saved on the device" icon: an arrow dropping into a tray.
-static void drawDownloadedIcon(int x, int y, bool ink) {
-  gfx::fillRect(x + 6, y, 4, 8, ink);                                          // arrow shaft
-  for (int r = 0; r < 6; r++) gfx::fillRect(x + 8 - (6 - r), y + 7 + r, 2 * (6 - r), 1, ink);  // arrow head
-  gfx::fillRect(x, y + 15, 16, 2, ink);                                         // tray bottom
-  gfx::fillRect(x, y + 11, 2, 6, ink);                                          // tray sides
-  gfx::fillRect(x + 14, y + 11, 2, 6, ink);
-}
-
-// Text in a normal row (black) or a highlighted one (white on the black highlight).
-static void label(int x, int y, const char* s, bool highlighted) { gfx::text(x, y, s, !highlighted); }
 
 static void drawList(bool full) {
   gfx::clear();
@@ -557,162 +349,7 @@ static void drawList(bool full) {
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
   drawHints();
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
-}
-
-// ---- Home statistics (the same dashboard widgets as the Android app) ---------------------------------------------
-
-constexpr const char* kStatsFile = "/BookOrbit/.stats.json";
-constexpr const char* kStatTypes[] = {"reading-streak", "reading-goal", "reading-rhythm", "year-projection", "monthly-challenge", "library-overview"};
-
-struct Stats {
-  bool readingNow = false;
-  long nowId = 0, nowFileId = 0;
-  char nowTitle[96] = "", nowAuthor[64] = "";
-  float nowProgress = 0;
-  bool streak = false, goal = false, rhythm = false, projection = false, challenge = false, overview = false;
-  int streakDays = 0, longest = 0;
-  bool week[7] = {};
-  int goalDone = 0, goalBooks = 0, goalYear = 0;
-  int minutes[7] = {}, nDays = 0, avgMin = 0, consistency = 0;
-  int projBooks = 0, projDone = 0;
-  char trend[8] = "";
-  char challengeTitle[48] = "";
-  int chProgress = 0, chTarget = 1;
-  bool chDone = false;
-  int books = 0, authors = 0, series = 0, addedYear = 0;
-  bool any() const { return readingNow || streak || goal || rhythm || projection || challenge || overview; }
-} stats;
-
-static void parseStats(const String& json) {
-  stats = Stats();
-  JsonDocument doc;
-  if (deserializeJson(doc, json)) return;
-  if (JsonObject d = doc["reading-now"]; !d.isNull()) {
-    stats.readingNow = true;
-    stats.nowId = d["id"] | 0L;
-    stats.nowFileId = d["fileId"] | 0L;
-    strlcpy(stats.nowTitle, d["title"] | "", sizeof(stats.nowTitle));
-    strlcpy(stats.nowAuthor, d["author"] | "", sizeof(stats.nowAuthor));
-    stats.nowProgress = d["progress"] | 0.0f;
-  }
-  if (JsonObject d = doc["reading-streak"]; !d.isNull()) {
-    stats.streak = true;
-    stats.streakDays = d["currentStreak"] | 0;
-    stats.longest = d["longestStreak"] | 0;
-    int i = 0;
-    for (JsonVariant v : d["lastSevenDays"].as<JsonArray>()) if (i < 7) stats.week[i++] = v.as<bool>();
-  }
-  if (JsonObject d = doc["reading-goal"]; !d.isNull()) {
-    stats.goal = true;
-    stats.goalDone = d["completedBooks"] | 0;
-    stats.goalBooks = d["goalBooks"] | 0;
-    stats.goalYear = d["year"] | 0;
-  }
-  if (JsonObject d = doc["reading-rhythm"]; !d.isNull()) {
-    stats.rhythm = true;
-    for (JsonObject day : d["days"].as<JsonArray>()) if (stats.nDays < 7) stats.minutes[stats.nDays++] = (int)((day["readingSeconds"] | 0.0) / 60);
-    stats.avgMin = (int)((d["avgSecondsPerDay"] | 0.0) / 60);
-    stats.consistency = d["consistencyPercent"] | 0;
-  }
-  if (JsonObject d = doc["year-projection"]; !d.isNull()) {
-    stats.projection = true;
-    stats.projBooks = d["projectedBooks"] | 0;
-    stats.projDone = d["booksCompletedYtd"] | 0;
-    strlcpy(stats.trend, d["trend"] | "", sizeof(stats.trend));
-  }
-  if (JsonObject d = doc["monthly-challenge"]; !d.isNull()) {
-    stats.challenge = true;
-    strlcpy(stats.challengeTitle, d["title"] | "", sizeof(stats.challengeTitle));
-    stats.chProgress = d["progress"] | 0;
-    stats.chTarget = max(1, (int)(d["target"] | 1));
-    stats.chDone = d["completed"] | false;
-  }
-  if (JsonObject d = doc["library-overview"]; !d.isNull()) {
-    stats.overview = true;
-    stats.books = d["totalBooks"] | 0;
-    stats.authors = d["totalAuthors"] | 0;
-    stats.series = d["totalSeries"] | 0;
-    stats.addedYear = d["booksAddedThisYear"] | 0;
-  }
-}
-
-static void loadStatsCache() {
-  if (SdMan.exists(kStatsFile)) parseStats(SdMan.readFile(kStatsFile));
-}
-
-// Fetches fresh numbers (online only) and caches them; returns true when the displayed stats changed.
-static bool refreshStats() {
-  String json, error;
-  if (!api.fetchWidgets(kStatTypes, sizeof(kStatTypes) / sizeof(kStatTypes[0]), json, error)) {
-    Serial.printf("stats: %s\n", error.c_str());
-    return false;
-  }
-  Book now;
-  float nowProgress = 0;
-  bool found = false;
-  const bool contOk = api.fetchContinueReading(now, nowProgress, found, error);
-  Serial.printf("continue reading: %s%s\n", contOk ? (found ? "found: " : "nothing in progress") : "request failed: ", contOk ? (found ? now.title : "") : error.c_str());
-  if (contOk && found) {  // add the book being read to the cached document
-    JsonDocument doc;
-    deserializeJson(doc, json);
-    doc["reading-now"]["id"] = now.id;
-    doc["reading-now"]["fileId"] = now.fileId;
-    doc["reading-now"]["title"] = now.title;
-    doc["reading-now"]["author"] = now.author;
-    doc["reading-now"]["progress"] = nowProgress;
-    json = "";
-    serializeJson(doc, json);
-  }
-  const String before = SdMan.exists(kStatsFile) ? SdMan.readFile(kStatsFile) : String();
-  if (json == before) return false;
-  SdMan.ensureDirectoryExists("/BookOrbit");
-  SdMan.writeFile(kStatsFile, json);
-  parseStats(json);
-  Serial.println("stats refreshed");
-  return true;
-}
-
-// Filled rectangle with rounded corners of radius r.
-static void roundRect(int x, int y, int w, int h, int r, bool black) {
-  for (int j = 0; j < h; j++) {
-    const int fromEdge = j < r ? r - j : (j >= h - r ? j - (h - r) + 1 : 0);
-    int inset = 0;
-    if (fromEdge > 0) inset = r - (int)sqrtf((float)(r * r - (fromEdge - 0.5f) * (fromEdge - 0.5f)));
-    gfx::fillRect(x + inset, y + j, w - 2 * inset, 1, black);
-  }
-}
-
-// A 2 px outline with slightly rounded corners; `solid` fills it black (the highlighted state).
-static void frame(int x, int y, int w, int h, int r = 8, bool solid = false) {
-  roundRect(x, y, w, h, r, true);
-  if (!solid) roundRect(x + 2, y + 2, w - 4, h - 4, max(0, r - 2), false);
-}
-
-static void card(int x, int y, int w, int h, const char* title) {
-  frame(x, y, w, h);
-  gfx::text(x + 10, y + 5, gfx::ellipsize(title, w - 20));
-}
-
-static void bar(int x, int y, int w, int h, float fraction, bool inverse = false) {
-  if (inverse) {  // white outline and fill on a dark background
-    roundRect(x, y, w, h, 4, false);
-    roundRect(x + 2, y + 2, w - 4, h - 4, 2, true);
-  } else {
-    frame(x, y, w, h, 4);
-  }
-  const int fill = (int)((w - 8) * constrain(fraction, 0.0f, 1.0f));
-  if (fill > 0) roundRect(x + 4, y + 4, fill, h - 8, 2, !inverse);
-}
-
-static void dot(int cx, int cy, int r, bool filled) {
-  for (int dy = -r; dy <= r; dy++)
-    for (int dx = -r; dx <= r; dx++) {
-      const int d2 = dx * dx + dy * dy;
-      if (filled ? d2 <= r * r : (d2 <= r * r && d2 > (r - 2) * (r - 2))) gfx::fillRect(cx + dx, cy + dy, 1, 1, true);
-    }
+  present(full);
 }
 
 // ---- Reading companion (the Android app's pet widget) -----------------------------------------------------------
@@ -812,23 +449,9 @@ void testFakeNow() {  // test hook: pretend a book is in progress
   stats.nowProgress = 42;  // press a key afterwards to redraw
 }
 
-// The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected.
-// Shortens `s` in place with "..." until it fits `maxW` at the given large size (UTF-8 safe).
-static void fitBig(char* s, int maxW, int size) {
-  if (gfx::bigTextWidth(s, size) <= maxW) return;
-  size_t n = strlen(s);
-  while (n > 0) {
-    n--;
-    while (n > 0 && (s[n] & 0xC0) == 0x80) n--;  // back to the start of a character
-    char tmp[100];
-    snprintf(tmp, sizeof(tmp), "%.*s...", (int)n, s);
-    if (gfx::bigTextWidth(tmp, size) <= maxW || n == 0) {
-      strlcpy(s, tmp, 100);
-      return;
-    }
-  }
-}
+// ---- Home: Reading now, Library and the statistics cards (the same dashboard widgets as the Android app) ------
 
+// The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected.
 static void drawReadingNow(int y, bool sel) {
   const int kFull = gfx::W - 2 * kMargin;
   char buf[16];
@@ -977,9 +600,7 @@ static void drawHome(bool full) {
   }
   drawStats(y + kRowHeight - 4 + 6);
   drawHints(true, true, false, true, true);
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 // ---- Settings -------------------------------------------------------------------------------------------------
@@ -998,44 +619,34 @@ static void drawSettings(bool full) {
   const char* sectionOf[8] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr, "Firmware"};  // heading above the row
   const char* names[8] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after", "Update"};
   String sleepText = String(sleepMinutes) + " min";
-  String stars;
-  for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
-  const String values[8] = {config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText, String("v") + updater::currentVersion()};
-  constexpr int kRowH = 52, kRowPitch = 58, kHeadingH = 34;
+  const String values[8] = {config.ssid, config.server, config.username, masked(config.password), kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText, String("v") + updater::currentVersion()};
+  constexpr int kRowPitch = 58, kHeadingH = 34;
   int y = 60;
   for (int i = 0; i < 8; i++) {
-    if (sectionOf[i]) {  // a heading: the name in capitals, then a rule to the edge
-      String h = sectionOf[i];
-      h.toUpperCase();
-      gfx::text(kMargin, y + 2, h.c_str());
-      gfx::text(kMargin + 1, y + 2, h.c_str());  // a second pass makes it bolder
-      const int w = gfx::textWidth(h.c_str()) + 10;
-      gfx::fillRect(kMargin + w, y + 16, gfx::W - 2 * kMargin - w, 2, true);
+    if (sectionOf[i]) {
+      heading(y, sectionOf[i]);
       y += kHeadingH;
     }
-    const bool sel = i == settingsSel;
-    if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kRowH, 8, true); else frame(kMargin, y, gfx::W - 2 * kMargin, kRowH);
-    gfx::text(kMargin + 14, y + 11, names[i], !sel);
-    const int valueX = gfx::W - kMargin - 14;
-    const char* v = gfx::ellipsize(values[i].c_str(), valueX - (kMargin + 14 + gfx::textWidth(names[i])) - 16);
-    gfx::text(valueX - gfx::textWidth(v), y + 11, v, !sel);
+    valueRow(y, names[i], values[i], i == settingsSel);
     y += kRowPitch;
   }
-  // About: read-only facts.
-  gfx::text(kMargin, y + 2, "ABOUT");
-  gfx::text(kMargin + 1, y + 2, "ABOUT");
-  gfx::fillRect(kMargin + gfx::textWidth("ABOUT") + 10, y + 16, gfx::W - 2 * kMargin - gfx::textWidth("ABOUT") - 10, 2, true);
+  heading(y, "About");  // read-only facts
   char line[96];
   snprintf(line, sizeof(line), "Battery: %d%%", (int)battery.readPercentage());
   gfx::text(kMargin, y + kHeadingH, line);
   drawHints(true, true, false);
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 // A list to choose one value from (companion or sleep timer), opened from Settings.
 constexpr int kPickerRows = 9, kPickerRowH = 70;
+
+// Moves the selection of a scrolling list one step (wrapping around) and keeps it among the kPickerRows rows shown from top.
+static void stepList(int& sel, int& top, int n, int dir) {
+  sel = (sel + dir + n) % n;
+  if (sel < top) top = sel;
+  if (sel >= top + kPickerRows) top = sel - kPickerRows + 1;
+}
 
 static int pickerCount() { return pickerKind == 0 ? pets::kCount : pickerKind == 2 ? 2 : (int)(sizeof(kSleepOptions) / sizeof(kSleepOptions[0])); }
 static String pickerLabel(int i) { return pickerKind == 0 ? String(pets::kNames[i]) : pickerKind == 2 ? String(i == 0 ? "Key grid" : "Classic T9 (multi-tap)") : String(kSleepOptions[i]) + (kSleepOptions[i] == 1 ? " minute" : " minutes"); }
@@ -1075,9 +686,7 @@ static void drawPicker(bool full) {
     gfx::text(gfx::W - kMargin - gfx::textWidth(pos), gfx::H - 96, pos);
   }
   drawHints(true, true, false);
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 // Screen changes are only scheduled here; loop() draws them once the panel is idle (pumpDisplay). Buttons therefore never
@@ -1111,15 +720,23 @@ static void startWifi() {
   netStart = millis();
 }
 
-// Stores the credentials in /bookorbit.json (other settings there are kept) and starts connecting with them.
-static void saveWifiCreds(const String& ssid, const String& password) {
+// Changes some settings in /bookorbit.json, keeping whatever else is in it: edit(doc) sets the fields.
+template <typename Edit>
+static void editConfigFile(Edit edit) {
   JsonDocument doc;
   if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
-  doc["ssid"] = ssid;
-  doc["wifiPassword"] = password;
+  edit(doc);
   String json;
   serializeJsonPretty(doc, json);
   SdMan.writeFile("/bookorbit.json", json);
+}
+
+// Stores the credentials in /bookorbit.json (other settings there are kept) and starts connecting with them.
+static void saveWifiCreds(const String& ssid, const String& password) {
+  editConfigFile([&](JsonDocument& doc) {
+    doc["ssid"] = ssid;
+    doc["wifiPassword"] = password;
+  });
   config.ssid = ssid;
   config.wifiPassword = password;
   startWifi();
@@ -1139,15 +756,13 @@ static void clearServerData() {
   SdMan.removeDir("/BookOrbit/.covers");
   SdMan.removeDir("/BookOrbit/.library");
   SdMan.removeDir("/BookOrbit/.cache");
-  SdMan.remove(kStatsFile);
-  SdMan.remove(kOutbox);
-  SdMan.remove(kSessionOutbox);
+  outbox::clear();
   for (const String& name : SdMan.listFiles("/BookOrbit", 500)) {
     String lower = name;
     lower.toLowerCase();
     if (lower.endsWith(".epub") || lower.endsWith(".part")) SdMan.remove((String("/BookOrbit/") + name).c_str());
   }
-  stats = Stats();
+  clearStats();
   bookCount = bookTotal = 0;
   page = selected = homeSel = 0;
 }
@@ -1161,23 +776,10 @@ static bool saveAccountField(int target, String value) {
     value = normalizeServer(value);
     if (value.isEmpty()) return false;
   }
-  JsonDocument doc;
-  if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
-  bool serverChanged = false;
-  if (target == KbServer) {
-    serverChanged = value != config.server;
-    doc["server"] = value;
-    config.server = value;
-  } else if (target == KbUsername) {
-    doc["username"] = value;
-    config.username = value;
-  } else {
-    doc["password"] = value;
-    config.password = value;
-  }
-  String json;
-  serializeJsonPretty(doc, json);
-  SdMan.writeFile("/bookorbit.json", json);
+  const bool serverChanged = target == KbServer && value != config.server;
+  const char* key = target == KbServer ? "server" : target == KbUsername ? "username" : "password";
+  editConfigFile([&](JsonDocument& doc) { doc[key] = value; });
+  (target == KbServer ? config.server : target == KbUsername ? config.username : config.password) = value;
   api.configure(config.server, config.insecureTls);
   if (serverChanged) clearServerData();  // another server: its books and numbers do not apply
   if (WiFi.getMode() == WIFI_OFF) startWifi();  // sign in again in the background
@@ -1266,6 +868,22 @@ bool t9Sym = false;  // the T9 keyboard is showing the symbol grid (the # key)
 static void t9Reset();
 static void drawT9(bool full);
 
+// The top of both keyboards: what is being typed (with a hint above it), the text so far and a line of help under it.
+static void drawTextField(const char* help) {
+  gfx::clear();
+  static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
+  header(titles[kbTarget]);
+  if (kbTarget == KbWifiPassword) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
+  if (kbTarget == KbServer) gfx::text(kMargin, 66, "e.g. http://192.168.1.4:3000");
+  frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
+  // The text field shows the end of what was typed, with a cursor.
+  String shown = kbText;
+  while (shown.length() > 1 && gfx::textWidth(shown.c_str()) > gfx::W - 2 * kMargin - 40) shown.remove(0, 1);
+  shown += "_";
+  gfx::text(kMargin + 14, 124, shown.c_str());
+  gfx::text(kMargin, 184, help);
+}
+
 static void openKeyboard(int target, const String& startText) {
   kbTarget = target;
   kbText = startText;
@@ -1282,18 +900,7 @@ static void drawKeyboard(bool full) {
     drawT9(full);
     return;
   }
-  gfx::clear();
-  static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
-  header(titles[kbTarget]);
-  if (kbTarget == KbWifiPassword) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
-  if (kbTarget == KbServer) gfx::text(kMargin, 66, "e.g. http://192.168.1.4:3000");
-  frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
-  // The text field shows the end of what was typed, with a cursor.
-  String shown = kbText;
-  while (shown.length() > 1 && gfx::textWidth(shown.c_str()) > gfx::W - 2 * kMargin - 40) shown.remove(0, 1);
-  shown += "_";
-  gfx::text(kMargin + 14, 124, shown.c_str());
-  gfx::text(kMargin, 184, kbMode == 1 ? "Capital letter" : kbMode == 2 ? "Symbols" : "Back deletes");
+  drawTextField(kbMode == 1 ? "Capital letter" : kbMode == 2 ? "Symbols" : "Back deletes");
   for (int r = 0; r < 4; r++) {
     const char* keys = kKbRows[kbMode][r];
     for (int c = 0; c < 10; c++) {
@@ -1443,17 +1050,7 @@ static bool t9Press() {
 }
 
 static void drawT9(bool full) {
-  gfx::clear();
-  static const char* const titles[] = {"Network name", "Wi-Fi password", "Server address", "Username", "Password"};
-  header(titles[kbTarget]);
-  if (kbTarget == KbWifiPassword) gfx::text(kMargin, 66, gfx::ellipsize(pendingSsid.c_str(), gfx::W - 2 * kMargin));
-  if (kbTarget == KbServer) gfx::text(kMargin, 66, "e.g. http://192.168.1.4:3000");
-  frame(kMargin, 110, gfx::W - 2 * kMargin, 60);
-  String shown = kbText;
-  while (shown.length() > 1 && gfx::textWidth(shown.c_str()) > gfx::W - 2 * kMargin - 40) shown.remove(0, 1);
-  shown += "_";
-  gfx::text(kMargin + 14, 124, shown.c_str());
-  gfx::text(kMargin, 184, "Press a key again for the next letter");
+  drawTextField("Press a key again for the next letter");
   constexpr int kCellW = 144, kCellH = 64, kPitchY = 72, kTop = 230;
   const int kLeft = 16 + kKbShift;
   for (int r = 0; r < 4; r++)
@@ -1480,31 +1077,6 @@ static void drawT9(bool full) {
 
 // ---- Switching server: confirm, then clear --------------------------------------------------------------------------
 
-// Draws `text` word-wrapped into `w` pixels from (x, y); returns the y below the last line.
-static int wrapText(int x, int y, int w, const String& text) {
-  String line;
-  int start = 0;
-  while (start <= (int)text.length()) {
-    int sp = text.indexOf(' ', start);
-    if (sp < 0) sp = text.length();
-    const String word = text.substring(start, sp);
-    const String tryLine = line.isEmpty() ? word : line + " " + word;
-    if (gfx::textWidth(tryLine.c_str()) > w && !line.isEmpty()) {
-      gfx::text(x, y, line.c_str());
-      y += gfx::lineHeight();
-      line = word;
-    } else {
-      line = tryLine;
-    }
-    start = sp + 1;
-  }
-  if (!line.isEmpty()) {
-    gfx::text(x, y, line.c_str());
-    y += gfx::lineHeight();
-  }
-  return y;
-}
-
 static void drawConfirm(bool full) {
   gfx::clear();
   header("Switch server?");
@@ -1520,12 +1092,7 @@ static void drawConfirm(bool full) {
                "positions waiting to sync. Books you copied to the card yourself are not touched. After switching, set your "
                "username and password for the new server.");
   const char* labels[2] = {"Cancel", "Switch and clear data"};
-  for (int i = 0; i < 2; i++) {
-    const int by = y + 24 + i * 72;
-    const bool sel = i == confirmSel;
-    if (sel) roundRect(kMargin, by, gfx::W - 2 * kMargin, 60, 8, true); else frame(kMargin, by, gfx::W - 2 * kMargin, 60);
-    gfx::text(kMargin + (gfx::W - 2 * kMargin - gfx::textWidth(labels[i])) / 2, by + 15, labels[i], !sel);
-  }
+  for (int i = 0; i < 2; i++) button(y + 24 + i * 72, labels[i], i == confirmSel);
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
 }
@@ -1575,9 +1142,7 @@ static void drawBrowse(bool full) {
     label(kMargin + 4, y + 4 + gfx::lineHeight() - 2, sub, sel);
   }
   drawHints(true, true, false);
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 static void drawEntities(bool full) {
@@ -1598,9 +1163,7 @@ static void drawEntities(bool full) {
   }
   if (entCount == 0) gfx::text(kMargin, 120, "Nothing here");
   drawHints(true, true, true);
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 static void drawSetup(bool full);
@@ -1655,14 +1218,10 @@ static bool connectWifi(String& error) {
   return true;
 }
 
-static bool ensureWifi(String& error) {
-  return WiFi.status() == WL_CONNECTED || connectWifi(error);
-}
-
 static void syncModal(const char* title, const String& body);
 static void backgroundSync();
 
-static bool unsynced() { return syncFailed || SdMan.exists(kOutbox) || SdMan.exists(kSessionOutbox); }
+static bool unsynced() { return syncFailed || outbox::pending(); }
 
 static void goOffline() {
   WiFi.disconnect(true);
@@ -1702,8 +1261,8 @@ static bool goOnline(String& error, bool announce = true) {
     goOffline();
     return false;
   }
-  flushProgress();
-  flushSessions();
+  outbox::flushProgress(api);
+  outbox::flushSessions(api);
   syncFailed = false;
   net = Net::Online;
   lastNetUse = millis();
@@ -1875,10 +1434,8 @@ void testSyncModal() { syncModal("In sync", "Server position: 12%"); }  // test 
 static void openBook(const Book& b) {
   String path = BookOrbit::pathFor(b), error;
   if (!SdMan.exists(path.c_str())) {
-    busy = true;  // shown by the "Downloading" screen
     message("Downloading", String(gfx::ellipsize(b.title, 440)) + "\nPlease wait...", false);
     if (!goOnline(error, false) || !api.download(b, path, error, downloadProgress)) {
-      busy = false;
       message("Download failed", error + "\n\nPress any button", false);
       Serial.printf("download failed: %s\n", error.c_str());
       waitForKey();
@@ -1935,33 +1492,9 @@ static void openReadingNow() {
 static float sleepLivePct = -1;
 static long sleepLiveFile = 0;
 
-// Splits `text` over at most two lines of `maxW` at the given large size (the second shortened with "..."); returns the line count.
-static int wrapBig(const char* text, int maxW, int size, char* l1, char* l2) {
-  strlcpy(l1, text, 100);
-  l2[0] = 0;
-  if (gfx::bigTextWidth(l1, size) > maxW) {
-    int cut = -1;  // the last space after which the first line still fits
-    for (int i = 0; l1[i]; i++) {
-      if (l1[i] != ' ') continue;
-      l1[i] = 0;
-      const bool fits = gfx::bigTextWidth(l1, size) <= maxW;
-      l1[i] = ' ';
-      if (!fits) break;
-      cut = i;
-    }
-    if (cut > 0) {
-      strlcpy(l2, text + cut + 1, 100);
-      l1[cut] = 0;
-    }
-  }
-  fitBig(l1, maxW, size);
-  fitBig(l2, maxW, size);
-  return l2[0] ? 2 : 1;
-}
-
 static void drawSleepScreen(int sync) {
   gfx::clear();  // light page
-  if (!stats.any()) loadStatsCache();  // reading mode starts without the statistics
+  if (!stats.any()) loadStats();  // reading mode starts without the statistics
   loadPet();
   const bool book = stats.readingNow && stats.nowId;
   if (book) gfx::loadUiFont();
@@ -2062,9 +1595,9 @@ static bool initApi(String& error) {
 static void syncBeforeSleep() {
   String error;
   if (!goOnline(error, false)) return;  // stays unsynced: the sleep screen then shows the crossed-out sync icon
-  flushProgress();
-  flushSessions();
-  refreshStats();
+  outbox::flushProgress(api);
+  outbox::flushSessions(api);
+  refreshStats(api);
   if (stats.readingNow && stats.nowId && !cover::cached(stats.nowId)) ensureReadingCover();  // the sleep screen shows it: have it ready
 }
 
@@ -2101,7 +1634,7 @@ static void syncBeforeSleep() {
 // instant; the restart below then rebuilds the same screen and starts the sync.
 static void showDestinationMock() {
   gfx::loadUiFont();  // reading mode starts without it
-  loadStatsCache();
+  loadStats();
   loadPet();
   screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
   if (screen == Screen::Library) {
@@ -2137,51 +1670,57 @@ static RMenu readerMenu = RMenu::None;
 static int readerMenuSel = 0, tocTop = 0;
 static int mainItems[3], mainCount = 0;  // 0 = Contents, 1 = Text size, 2 = Margins
 constexpr const char* kMarginNames[] = {"Narrow", "Normal", "Wide", "Wider"};
+constexpr int kSizeCount = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
+constexpr int kMarginCount = sizeof(reader::kMargins) / sizeof(reader::kMargins[0]);
 
-static void drawMenuBox(const char* title, int rows, int h, int& x, int& y, int& w) {
+static int menuBoxH = 0;  // height of the box (or full-screen list) now over the page, 0 = none
+
+static void drawMenuBox(const char* title, int h, int& x, int& y, int& w) {
   w = 230;
   x = (gfx::W - w) / 2;
   y = 250;
   gfx::waitIdle();
+  if (h < menuBoxH) {  // a smaller box would leave the bigger one's edges behind: put the page back first
+    reader::uiFont(false);
+    reader::render();
+    reader::uiFont(true);
+  }
+  menuBoxH = h;
   gfx::fadeBackground();
   frame(x, y, w, h, 12);
   gfx::bigText(x + 18, y + 8, title, 18);
   gfx::fillRect(x + 10, y + 34, w - 20, 2, true);
 }
 
-static void drawReaderMenu() {
+// A menu box over the page with `n` rows; row(i, buf) writes the text of row i into a 24-byte buffer.
+template <typename Row>
+static void drawMenuRows(const char* title, int n, Row row) {
   constexpr int rowH = 34;
   int x, y, w;
+  drawMenuBox(title, 50 + n * rowH, x, y, w);
+  for (int i = 0; i < n; i++) {
+    const int ry = y + 40 + i * rowH;
+    const bool sel = i == readerMenuSel;
+    if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
+    char text[24];
+    row(i, text);
+    gfx::bigText(x + 22, ry + 4, text, 18, !sel);
+  }
+}
+
+static void drawReaderMenu() {
   if (readerMenu == RMenu::Main) {
-    drawMenuBox("Menu", mainCount, 50 + mainCount * rowH, x, y, w);
-    for (int i = 0; i < mainCount; i++) {
-      const int ry = y + 40 + i * rowH;
-      const bool sel = i == readerMenuSel;
-      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
-      gfx::bigText(x + 22, ry + 4, mainItems[i] == 0 ? "Contents" : mainItems[i] == 1 ? "Text size" : "Margins", 18, !sel);
-    }
+    drawMenuRows("Menu", mainCount, [](int i, char* text) {
+      strlcpy(text, mainItems[i] == 0 ? "Contents" : mainItems[i] == 1 ? "Text size" : "Margins", 24);
+    });
   } else if (readerMenu == RMenu::Size) {
-    constexpr int n = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
-    drawMenuBox("Text size", n, 50 + n * rowH, x, y, w);
-    for (int i = 0; i < n; i++) {
-      const int ry = y + 40 + i * rowH;
-      const bool sel = i == readerMenuSel;
-      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
-      char row[24];
-      snprintf(row, sizeof(row), "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
-      gfx::bigText(x + 22, ry + 4, row, 18, !sel);
-    }
+    drawMenuRows("Text size", kSizeCount, [](int i, char* text) {
+      snprintf(text, 24, "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
+    });
   } else if (readerMenu == RMenu::Margin) {
-    constexpr int n = sizeof(reader::kMargins) / sizeof(reader::kMargins[0]);
-    drawMenuBox("Margins", n, 50 + n * rowH, x, y, w);
-    for (int i = 0; i < n; i++) {
-      const int ry = y + 40 + i * rowH;
-      const bool sel = i == readerMenuSel;
-      if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
-      char row[24];
-      snprintf(row, sizeof(row), "%s%s", kMarginNames[i], reader::kMargins[i] == reader::margin() ? "  *" : "");
-      gfx::bigText(x + 22, ry + 4, row, 18, !sel);
-    }
+    drawMenuRows("Margins", kMarginCount, [](int i, char* text) {
+      snprintf(text, 24, "%s%s", kMarginNames[i], reader::kMargins[i] == reader::margin() ? "  *" : "");
+    });
   } else if (readerMenu == RMenu::Toc) {
     constexpr int visible = 14, rh = 48;
     const int n = reader::tocCount();
@@ -2189,6 +1728,7 @@ static void drawReaderMenu() {
     if (readerMenuSel >= tocTop + visible) tocTop = readerMenuSel - visible + 1;
     gfx::waitIdle();
     gfx::clear();
+    menuBoxH = gfx::H;
     gfx::fillRect(0, 46, gfx::W, 2, true);
     gfx::text(kMargin, 7, "Contents");
     const int cur = reader::tocCurrent();
@@ -2218,6 +1758,7 @@ static void openReaderMenu() {
   mainItems[mainCount++] = 2;
   readerMenu = RMenu::Main;
   readerMenuSel = 0;
+  menuBoxH = 0;
   reader::uiFont(true);
   drawReaderMenu();
 }
@@ -2225,7 +1766,7 @@ static void openReaderMenu() {
 static void readerMenuLoop() {
   const bool down = pressed(InputManager::BTN_DOWN) || pressed(InputManager::BTN_RIGHT);
   const bool up = !down && (pressed(InputManager::BTN_UP) || pressed(InputManager::BTN_LEFT));
-  int count = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])) : readerMenu == RMenu::Margin ? (int)(sizeof(reader::kMargins) / sizeof(reader::kMargins[0])) : reader::tocCount();
+  const int count = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? kSizeCount : readerMenu == RMenu::Margin ? kMarginCount : reader::tocCount();
   if (down || up) {
     readerMenuSel = (readerMenuSel + (down ? 1 : count - 1)) % max(1, count);
     drawReaderMenu();
@@ -2238,12 +1779,12 @@ static void readerMenuLoop() {
       } else if (mainItems[readerMenuSel] == 2) {
         readerMenu = RMenu::Margin;
         readerMenuSel = 1;
-        for (int i = 0; i < (int)(sizeof(reader::kMargins) / sizeof(reader::kMargins[0])); i++)
+        for (int i = 0; i < kMarginCount; i++)
           if (reader::kMargins[i] == reader::margin()) readerMenuSel = i;
       } else {
         readerMenu = RMenu::Size;
         readerMenuSel = 2;
-        for (int i = 0; i < (int)(sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0])); i++)
+        for (int i = 0; i < kSizeCount; i++)
           if (reader::kFontSizes[i] == reader::fontSize()) readerMenuSel = i;
       }
       drawReaderMenu();
@@ -2355,7 +1896,7 @@ void setup() {
     for (const String& name : SdMan.listFiles("/BookOrbit/.library", 100))
       if (name.startsWith("8-")) SdMan.remove((String("/BookOrbit/.library/") + name).c_str());
   }
-  loadStatsCache();
+  loadStats();
   loadPet();
   screen = openLibraryMagic == kLibraryMagic ? Screen::Library : Screen::Home;
   if (screen == Screen::Library && openScope >= 1 && openScope <= 3) {  // back to the author / series / scope the book was opened from
@@ -2395,10 +1936,10 @@ void setup() {
     online = api.login(config.username, config.password, error);
   }
   if (online) {
-    flushProgress();
-    flushSessions();
+    outbox::flushProgress(api);
+    outbox::flushSessions(api);
     net = Net::Online;
-    refreshStats();
+    refreshStats(api);
     online = loadPage(0, error);
   }
   if (!online) fatal("Offline", error + "\n\nNo cached library yet.");
@@ -2436,16 +1977,15 @@ static void backgroundSync() {
   Serial.printf("wifi ok, ip %s\n", WiFi.localIP().toString().c_str());
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // wall-clock time for reading sessions
   const int keep = selected, keepPage = page;
-  setBusy(true);
   syncModal("Syncing", fromBook ? "Progress and statistics..." : "Statistics...");  // the buttons are not read until it is done
   if (api.login(config.username, config.password, error)) {
     pollSleep();
-    if (fromBook) flushProgress();  // after waking, progress waits for a book to be opened or for sleep
-    flushSessions();
+    if (fromBook) outbox::flushProgress(api);  // after waking, progress waits for a book to be opened or for sleep
+    outbox::flushSessions(api);
     syncFailed = false;
     net = Net::Online;
     pollSleep();
-    if (!sleepPending) { refreshStats(); pollSleep(); }
+    if (!sleepPending) { refreshStats(api); pollSleep(); }
     if (!sleepPending) { ensureReadingCover(); pollSleep(); }
     if (!sleepPending && loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
@@ -2456,7 +1996,6 @@ static void backgroundSync() {
     Serial.printf("offline: %s\n", error.c_str());
   }
   lastNetUse = millis();
-  busy = false;
   showList(false);
 }
 
@@ -2471,9 +2010,9 @@ static void manualSync() {
     return;
   }
   syncModal("Syncing", "Progress and statistics...");
-  flushProgress();
-  flushSessions();
-  refreshStats();
+  outbox::flushProgress(api);
+  outbox::flushSessions(api);
+  refreshStats(api);
   ensureReadingCover();
   syncModal("Synced", "Progress and statistics are up to date");
   delay(900);
@@ -2503,6 +2042,11 @@ static void fetchReadingCover() {
   const long id = stats.nowId;
   if (!stats.readingNow || !id || net != Net::Online || millis() < retryAfter || cover::cached(id)) return;
   if (ensureReadingCover()) showList(false); else retryAfter = millis() + 60000;
+}
+
+// After loading a list page: shows it, or the error (until a button is pressed).
+static void showLoaded(bool ok, const String& error) {
+  if (ok) showList(false); else message("Error", error + "\n\nPress any button");
 }
 
 // True once per click of Back (on release).
@@ -2580,10 +2124,7 @@ static void drawSetup(bool full) {
     y += 54;
     y = wrapText(kMargin, y, w, "First, connect the reader to your Wi-Fi. It is used to sync your library, reading progress "
                                 "and statistics with your BookOrbit server.");
-    const int by = y + 30;
-    roundRect(kMargin, by, w, 60, 8, true);
-    const char* label = "Choose network";
-    gfx::text(kMargin + (w - gfx::textWidth(label)) / 2, by + 15, label, false);
+    button(y + 30, "Choose network", true);
     drawHints(false, true, false);
   } else {
     char line[96];
@@ -2592,29 +2133,16 @@ static void drawSetup(bool full) {
     y += gfx::lineHeight() + 10;
     y = wrapText(kMargin, y, w, "Now sign in to your BookOrbit server.");
     y += 16;
-    String stars;
-    for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
     const char* names[3] = {"Server", "Username", "Password"};
-    const String values[3] = {config.server, config.username, stars};
+    const String values[3] = {config.server, config.username, masked(config.password)};
     for (int i = 0; i < 3; i++) {
-      const bool sel = setupSel == i;
-      if (sel) roundRect(kMargin, y, w, 52, 8, true); else frame(kMargin, y, w, 52);
-      gfx::text(kMargin + 14, y + 11, names[i], !sel);
-      const int valueX = gfx::W - kMargin - 14;
-      const char* v = gfx::ellipsize(values[i].c_str(), valueX - (kMargin + 14 + gfx::textWidth(names[i])) - 16);
-      gfx::text(valueX - gfx::textWidth(v), y + 11, v, !sel);
+      valueRow(y, names[i], values[i], setupSel == i);
       y += 58;
     }
-    const bool sel = setupSel == 3;
-    const int by = y + 14;
-    if (sel) roundRect(kMargin, by, w, 60, 8, true); else frame(kMargin, by, w, 60);
-    const char* label = "Sign in";
-    gfx::text(kMargin + (w - gfx::textWidth(label)) / 2, by + 15, label, !sel);
+    button(y + 14, "Sign in", setupSel == 3);
     drawHints(true, true, false);
   }
-  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
-  firstDraw = false;
-  halfNext = false;
+  present(full);
 }
 
 // Step 1 ends here: join the chosen network; on success go on to the server step, otherwise back to the list.
@@ -2662,16 +2190,13 @@ static void setupSignIn() {
     showList(false);
     return;
   }
-  JsonDocument doc;  // keep anything else that is already in the file
-  if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
-  doc["ssid"] = config.ssid;
-  doc["wifiPassword"] = config.wifiPassword;
-  doc["server"] = config.server;
-  doc["username"] = config.username;
-  doc["password"] = config.password;
-  String json;
-  serializeJsonPretty(doc, json);
-  SdMan.writeFile("/bookorbit.json", json);
+  editConfigFile([](JsonDocument& doc) {
+    doc["ssid"] = config.ssid;
+    doc["wifiPassword"] = config.wifiPassword;
+    doc["server"] = config.server;
+    doc["username"] = config.username;
+    doc["password"] = config.password;
+  });
   syncModal("All set", "Opening your library...");
   delay(1200);
   ESP.restart();
@@ -2848,14 +2373,10 @@ void loop() {
       if (net != Net::Offline) startWifi();
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN)) {
-      netSel = (netSel + 1) % (scanCount + 1);  // the last entry is "Other network..."
-      if (netSel < netTop) netTop = netSel;
-      if (netSel >= netTop + kPickerRows) netTop = netSel - kPickerRows + 1;
+      stepList(netSel, netTop, scanCount + 1, 1);  // the last entry is "Other network..."
       showList(false);
     } else if (pressed(InputManager::BTN_UP)) {
-      netSel = (netSel + scanCount) % (scanCount + 1);
-      if (netSel < netTop) netTop = netSel;
-      if (netSel >= netTop + kPickerRows) netTop = netSel - kPickerRows + 1;
+      stepList(netSel, netTop, scanCount + 1, -1);
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       networkChosen();
@@ -2868,14 +2389,10 @@ void loop() {
       screen = Screen::Settings;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN)) {
-      pickerSel = (pickerSel + 1) % pickerCount();
-      if (pickerSel < pickerTop) pickerTop = pickerSel;
-      if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
+      stepList(pickerSel, pickerTop, pickerCount(), 1);
       showList(false);
     } else if (pressed(InputManager::BTN_UP)) {
-      pickerSel = (pickerSel + pickerCount() - 1) % pickerCount();
-      if (pickerSel < pickerTop) pickerTop = pickerSel;
-      if (pickerSel >= pickerTop + kPickerRows) pickerTop = pickerSel - kPickerRows + 1;
+      stepList(pickerSel, pickerTop, pickerCount(), -1);
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (pickerKind == 0) {
@@ -2934,7 +2451,6 @@ void loop() {
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       String error;
-      if (net == Net::Online) setBusy(true);
       bool ok;
       if (browseSel == 0) {
         src = Scope::All;
@@ -2946,8 +2462,7 @@ void loop() {
         ok = loadEntities((Scope)browseSel, 0, error);
         if (ok) screen = Screen::Entities;
       }
-      busy = false;
-      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+      showLoaded(ok, error);
     }
     delay(10);
     return;
@@ -2965,26 +2480,18 @@ void loop() {
       src = entKind;
       srcId = entities[entSel].id;
       strlcpy(srcName, entities[entSel].name, sizeof(srcName));
-      if (net == Net::Online) setBusy(true);
       const bool ok = loadPage(0, error);
-      busy = false;
       if (ok) {
         screen = Screen::Library;
         showList(false);
       } else {
         src = Scope::All;
-        message("Error", error + "\n\nPress any button");
+        showLoaded(false, error);
       }
     } else if (pressed(InputManager::BTN_RIGHT) && (entPage + 1) * kPageSize < entTotal) {
-      if (net == Net::Online) setBusy(true);
-      const bool ok = loadEntities(entKind, entPage + 1, error);
-      busy = false;
-      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+      showLoaded(loadEntities(entKind, entPage + 1, error), error);
     } else if (pressed(InputManager::BTN_LEFT) && entPage > 0) {
-      if (net == Net::Online) setBusy(true);
-      const bool ok = loadEntities(entKind, entPage - 1, error);
-      busy = false;
-      if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+      showLoaded(loadEntities(entKind, entPage - 1, error), error);
     }
     delay(10);
     return;
@@ -3005,15 +2512,9 @@ void loop() {
   } else if (pressed(InputManager::BTN_CONFIRM)) {
     openSelected();
   } else if (pressed(InputManager::BTN_RIGHT) && (page + 1) * kPageSize < bookTotal) {
-    if (net == Net::Online) setBusy(true);
-    const bool ok = loadPage(page + 1, error);
-    busy = false;
-    if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+    showLoaded(loadPage(page + 1, error), error);
   } else if (pressed(InputManager::BTN_LEFT) && page > 0) {
-    if (net == Net::Online) setBusy(true);
-    const bool ok = loadPage(page - 1, error);
-    busy = false;
-    if (ok) showList(false); else message("Error", error + "\n\nPress any button");
+    showLoaded(loadPage(page - 1, error), error);
   }
   delay(10);
 }

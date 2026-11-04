@@ -9,6 +9,7 @@ bool open(const char* epubPath, String& error, float serverPercent = -1);
 void close();  // saves the position and frees memory
 bool isOpen();
 void draw(bool full);  // draws the current page and refreshes the panel
+void render();          // draws the current page into the framebuffer only (no refresh)
 bool next(bool full = false);  // false at the end of the book
 bool prev();                   // false at the start of the book
 void savePosition();
