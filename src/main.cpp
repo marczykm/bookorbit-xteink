@@ -343,24 +343,11 @@ static void handleSerial() {
 
 // ---- Screens -------------------------------------------------------------------------------------------------
 
-// A dot in the header while the device is talking to the BookOrbit server.
+// Set while the device is talking to the BookOrbit server (no longer drawn; the "Syncing" modal covers long waits).
+static bool quietSync = false;  // back from a book (a software restart): sync without the modal
 static bool busy = false;
-constexpr int kBusyDotX = gfx::W - kMargin - 37 - 14 - 26 - 14, kBusyDotY = 24;
 
-static void drawBusyDot() {
-  for (int dy = -5; dy <= 5; dy++)
-    for (int dx = -5; dx <= 5; dx++)
-      if (dx * dx + dy * dy <= 25) gfx::fillRect(kBusyDotX + dx, kBusyDotY + dy, 1, 1, true);
-}
-
-// Turning it on shows the dot straight away; callers redraw their screen when the request is done.
-static void setBusy(bool on) {
-  busy = on;
-  if (on) {
-    drawBusyDot();
-    gfx::flush(EInkDisplay::FAST_REFRESH);
-  }
-}
+static void setBusy(bool on) { busy = on; }
 
 void testBusyDot() { setBusy(true); busy = false; }  // test hook: show the dot without a request
 
@@ -374,7 +361,6 @@ static void header(const char* title) {
   gfx::batteryIcon(batX, 15, battery.readPercentage(), true);
   // The Wi-Fi icon is hidden for now (the radio is managed by the device); only the "not synced" icon sits next to the battery.
   if (unsynced()) drawSyncIcon(batX - 14 - 13, 24, 0.8f, true);  // something is waiting to be sent, or the last sync failed
-  if (busy) drawBusyDot();
 }
 
 // Centered multi-line message under the header; lines are separated by '\n'.
@@ -2304,6 +2290,7 @@ void setup() {
     strlcpy(srcName, openScopeName, sizeof(srcName));
   }
   openLibraryMagic = 0;
+  quietSync = esp_reset_reason() == ESP_RST_SW;
   String error;
   if (!initApi(error)) fatal("Setup needed", error + "\nSee config.example.json");
   if (loadCachedPage(0)) {  // show the library right away and connect in the background
@@ -2369,10 +2356,10 @@ static void backgroundSync() {
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // wall-clock time for reading sessions
   const int keep = selected, keepPage = page;
   setBusy(true);
+  if (!quietSync) syncModal("Syncing", "Statistics...");  // the buttons are not read until it is done
   if (api.login(config.username, config.password, error)) {
     pollSleep();
-    flushProgress();  // what must be sent is always sent, even when the device is about to sleep
-    flushSessions();
+    flushSessions();  // reading progress is sent when a book is opened or before sleep, not at wake-up
     syncFailed = false;
     net = Net::Online;
     pollSleep();
