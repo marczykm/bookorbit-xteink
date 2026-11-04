@@ -713,7 +713,7 @@ static bool petFinishedToday(const char* today) {
 
 static String petDuration(int min) { return min >= 60 ? String(min / 60) + " h " + String(min % 60) + " min" : String(min) + " min"; }
 
-static void drawPet(int x, int y, bool sel) {
+static void drawPet(int x, int y, int w, int h, bool sel) {
   int hour = 12;
   char today[16] = "";
   if (clockValid()) {
@@ -735,12 +735,28 @@ static void drawPet(int x, int y, bool sel) {
     case pets::Yawn: line1 = "Past bedtime"; line2 = petDuration(todayMin) + " read today"; break;
     default: line1 = "Ready when you are"; line2 = "Open a book to start"; break;
   }
-  const int w = gfx::W - 2 * kMargin;
-  frame(x, y, w, 80, 8, sel);
-  roundRect(x + 7, y + 7, 66, 66, 4, false);  // white plate under the sprite
-  gfx::blit1bit(x + 8, y + 8, pets::kSprites[petIndex][pose], 64, 64);
-  label(x + 84, y + 6, line1.c_str(), sel);
-  if (line2.length()) label(x + 84, y + 30, line2.c_str(), sel);
+  frame(x, y, w, h, 8, sel);
+  const int sx = x + (w - 66) / 2;
+  roundRect(sx - 1, y + 9, 66, 66, 4, false);  // white plate under the sprite
+  gfx::blit1bit(sx, y + 10, pets::kSprites[petIndex][pose], 64, 64);
+  // The two caption lines, centered under the sprite and wrapped to the card's width.
+  int ty = y + 80;
+  for (const String* line : {&line1, &line2}) {
+    String rest = *line;
+    while (rest.length() && ty < y + h - 22) {
+      String cur;
+      while (rest.length()) {  // as many words as fit
+        const int sp = rest.indexOf(' ');
+        const String word = sp < 0 ? rest : rest.substring(0, sp);
+        const String next = cur.length() ? cur + " " + word : word;
+        if (cur.length() && gfx::textWidth(next.c_str()) > w - 16) break;
+        cur = next;
+        rest = sp < 0 ? String() : rest.substring(sp + 1);
+      }
+      gfx::text(x + (w - gfx::textWidth(cur.c_str())) / 2, ty, gfx::ellipsize(cur.c_str(), w - 16), !sel);
+      ty += gfx::lineHeight() - 2;
+    }
+  }
 }
 
 void testFakeNow() {  // test hook: pretend a book is in progress
@@ -821,61 +837,65 @@ static void drawStats(int y) {
     gfx::text(kMargin, y + 26, "Statistics appear after the first sync.");
     return;
   }
-  constexpr int kHalf = 220, kRight = kMargin + kHalf + 8, kFull = gfx::W - 2 * kMargin;
+  constexpr int kHalf = 220, kRight = kMargin + kHalf + 8, kH = 157, kPitch = kH + 6;
   char buf[64];
-  drawPet(kMargin, y, false);  // display only; the companion is chosen in Settings
-  y += 86;
-  if (stats.streak) {
-    card(kMargin, y, kHalf, 134, "Reading streak");
-    snprintf(buf, sizeof(buf), "%d day%s", stats.streakDays, stats.streakDays == 1 ? "" : "s");
-    gfx::bigText(kMargin + 10, y + 30, buf, 32);
-    for (int i = 0; i < 7; i++) dot(kMargin + 18 + i * 29, y + 92, 7, stats.week[i]);
-    snprintf(buf, sizeof(buf), "Longest: %d", stats.longest);
-    gfx::text(kMargin + 10, y + 100, buf);
-  }
-  if (stats.goal) {
-    snprintf(buf, sizeof(buf), "%d goal", stats.goalYear);
-    card(kRight, y, kHalf, 134, buf);
-    if (stats.goalBooks > 0) {
-      snprintf(buf, sizeof(buf), "%d / %d", stats.goalDone, stats.goalBooks);
-      gfx::bigText(kRight + 10, y + 30, buf, 32);
-      bar(kRight + 10, y + 82, kHalf - 20, 16, (float)stats.goalDone / stats.goalBooks);
-      gfx::text(kRight + 10, y + 100, "books");
-    } else {
-      snprintf(buf, sizeof(buf), "%d read", stats.goalDone);
-      gfx::bigText(kRight + 10, y + 30, buf, 32);
-      gfx::text(kRight + 10, y + 86, "No goal set");
-    }
-  }
-  y += 140;
+  // Row 1: the companion and the reading rhythm.
+  drawPet(kMargin, y, kHalf, kH, false);  // display only; the companion is chosen in Settings
   if (stats.rhythm) {
-    card(kMargin, y, kFull, 120, "Reading rhythm");
+    card(kRight, y, kHalf, kH, "Reading rhythm");
     int mx = 1;
     for (int i = 0; i < stats.nDays; i++) mx = max(mx, stats.minutes[i]);
     for (int i = 0; i < stats.nDays; i++) {
-      const int h = max(3, 46 * stats.minutes[i] / mx);
-      roundRect(kMargin + 10 + i * 62, y + 82 - h, 50, h, 3, true);
+      const int bh = max(3, 54 * stats.minutes[i] / mx);
+      roundRect(kRight + 14 + i * 28, y + 88 - bh, 22, bh, 3, true);
     }
-    snprintf(buf, sizeof(buf), "%d min/day, %d%% of days read", stats.avgMin, stats.consistency);
-    gfx::text(kMargin + 10, y + 88, gfx::ellipsize(buf, kFull - 20));
+    snprintf(buf, sizeof(buf), "%d min/day", stats.avgMin);
+    gfx::text(kRight + 10, y + 98, buf);
+    snprintf(buf, sizeof(buf), "%d%% of days read", stats.consistency);
+    gfx::text(kRight + 10, y + 124, gfx::ellipsize(buf, kHalf - 20));
   }
-  y += 126;
+  y += kPitch;
+  // Row 2: streak and goal.
+  if (stats.streak) {
+    card(kMargin, y, kHalf, kH, "Reading streak");
+    snprintf(buf, sizeof(buf), "%d day%s", stats.streakDays, stats.streakDays == 1 ? "" : "s");
+    gfx::bigText(kMargin + 10, y + 36, buf, 32);
+    for (int i = 0; i < 7; i++) dot(kMargin + 18 + i * 29, y + 102, 7, stats.week[i]);
+    snprintf(buf, sizeof(buf), "Longest: %d", stats.longest);
+    gfx::text(kMargin + 10, y + 124, buf);
+  }
+  if (stats.goal) {
+    snprintf(buf, sizeof(buf), "%d goal", stats.goalYear);
+    card(kRight, y, kHalf, kH, buf);
+    if (stats.goalBooks > 0) {
+      snprintf(buf, sizeof(buf), "%d / %d", stats.goalDone, stats.goalBooks);
+      gfx::bigText(kRight + 10, y + 36, buf, 32);
+      bar(kRight + 10, y + 92, kHalf - 20, 16, (float)stats.goalDone / stats.goalBooks);
+      gfx::text(kRight + 10, y + 124, "books");
+    } else {
+      snprintf(buf, sizeof(buf), "%d read", stats.goalDone);
+      gfx::bigText(kRight + 10, y + 36, buf, 32);
+      gfx::text(kRight + 10, y + 96, "No goal set");
+    }
+  }
+  y += kPitch;
+  // Row 3: projection and the monthly challenge.
   if (stats.projection) {
     snprintf(buf, sizeof(buf), "On pace for %d", stats.goalYear);
-    card(kMargin, y, kHalf, 134, stats.goalYear ? buf : "On pace for the year");
+    card(kMargin, y, kHalf, kH, stats.goalYear ? buf : "On pace for the year");
     snprintf(buf, sizeof(buf), "%d books", stats.projBooks);
-    gfx::bigText(kMargin + 10, y + 28, buf, 30);
+    gfx::bigText(kMargin + 10, y + 34, buf, 30);
     snprintf(buf, sizeof(buf), "%d done so far", stats.projDone);
-    gfx::text(kMargin + 10, y + 70, buf);
+    gfx::text(kMargin + 10, y + 84, buf);
     snprintf(buf, sizeof(buf), "Trending %s", stats.trend);
-    if (*stats.trend && strcmp(stats.trend, "flat")) gfx::text(kMargin + 10, y + 100, buf);
+    if (*stats.trend && strcmp(stats.trend, "flat")) gfx::text(kMargin + 10, y + 120, buf);
   }
   if (stats.challenge) {
-    card(kRight, y, kHalf, 134, "Monthly challenge");
-    gfx::text(kRight + 10, y + 34, gfx::ellipsize(stats.challengeTitle, kHalf - 20));
-    bar(kRight + 10, y + 80, kHalf - 20, 16, (float)stats.chProgress / stats.chTarget);
+    card(kRight, y, kHalf, kH, "Monthly challenge");
+    gfx::text(kRight + 10, y + 40, gfx::ellipsize(stats.challengeTitle, kHalf - 20));
+    bar(kRight + 10, y + 92, kHalf - 20, 16, (float)stats.chProgress / stats.chTarget);
     snprintf(buf, sizeof(buf), stats.chDone ? "Completed" : "%d / %d", stats.chProgress, stats.chTarget);
-    gfx::text(kRight + 10, y + 100, buf);
+    gfx::text(kRight + 10, y + 124, buf);
   }
 }
 
