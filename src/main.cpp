@@ -1871,18 +1871,106 @@ static void openReadingNow() {
   openBook(b);
 }
 
+// Set by goToSleep() when it leaves a book: where the reader stood, so the sleep screen shows it even before the server knows.
+static float sleepLivePct = -1;
+static long sleepLiveFile = 0;
+
+// Splits `text` over at most two lines of `maxW` at the given large size (the second shortened with "..."); returns the line count.
+static int wrapBig(const char* text, int maxW, int size, char* l1, char* l2) {
+  strlcpy(l1, text, 100);
+  l2[0] = 0;
+  if (gfx::bigTextWidth(l1, size) > maxW) {
+    int cut = -1;  // the last space after which the first line still fits
+    for (int i = 0; l1[i]; i++) {
+      if (l1[i] != ' ') continue;
+      l1[i] = 0;
+      const bool fits = gfx::bigTextWidth(l1, size) <= maxW;
+      l1[i] = ' ';
+      if (!fits) break;
+      cut = i;
+    }
+    if (cut > 0) {
+      strlcpy(l2, text + cut + 1, 100);
+      l1[cut] = 0;
+    }
+  }
+  fitBig(l1, maxW, size);
+  fitBig(l2, maxW, size);
+  return l2[0] ? 2 : 1;
+}
+
 static void drawSleepScreen() {
   gfx::clear();  // light page
-  // The companion, asleep, enlarged three times.
+  if (!stats.any()) loadStatsCache();  // reading mode starts without the statistics
   loadPet();
-  constexpr int kScale = 3, kSize = 64 * kScale, kPetY = (gfx::H - kSize) / 2 - 24;  // centered (a little high: most sprites sit low in their square)
-  const int petX = (gfx::W - kSize) / 2;
+  const bool book = stats.readingNow && stats.nowId;
+  if (book) gfx::loadUiFont();
+  const int coverW = cover::BigW, coverH = cover::BigH;  // the large cover is drawn 1:1
+  constexpr int kTitleSize = 28, kTitleStep = 34, kAuthorSize = 22;
+  char t1[100] = "", t2[100] = "";
+  const int titleLines = book ? wrapBig(stats.nowTitle, gfx::W - 40, kTitleSize, t1, t2) : 0;
+  const bool author = book && stats.nowAuthor[0];
+  const int info = coverH + 18 + titleLines * kTitleStep + (author ? 30 : 0) + 18 + 14 + 10 + 34;  // cover down to the percentage
+  // The companion asleep, enlarged: two times over the cover's top right corner when there is a book, three times (centered) alone.
+  const int kScale = book ? 2 : 3, kSize = 64 * kScale;
+  const int y0 = book ? (gfx::H - info) / 2 + 24 : 0;  // the book block, a little low so the companion fits above its corner
+  const int cx = (gfx::W - coverW) / 2;
+  const int petX = book ? cx + coverW - 90 : (gfx::W - kSize) / 2;
+  const int petY = book ? y0 - 56 : (gfx::H - kSize) / 2 - 24;  // alone it sits a little high (sprites sit low in their square)
   const uint8_t* sprite = pets::kSprites[petIndex][pets::Sleep];
-  for (int y = 0; y < 64; y++)
-    for (int x = 0; x < 64; x++)
-      if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, kPetY + y * kScale, kScale, kScale, true);
+  auto drawPetSprite = [&]() {
+    if (book) {  // a white halo, so it stands out over the cover
+      for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++)
+          if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale - 4, petY + y * kScale - 4, kScale + 8, kScale + 8, false);
+    }
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++)
+        if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, petY + y * kScale, kScale, kScale, true);
+  };
+  if (book) {
+    float pct = stats.nowProgress;
+    if (sleepLivePct >= 0 && sleepLiveFile && sleepLiveFile == stats.nowFileId) pct = max(pct, sleepLivePct);  // the book just read
+    const int cy = y0;
+    gfx::fillRect(cx - 4, cy - 4, coverW + 8, coverH + 8, true);  // a frame around the cover
+    gfx::fillRect(cx - 2, cy - 2, coverW + 4, coverH + 4, false);
+    uint8_t* bits = (uint8_t*)malloc(cover::kBigBytes);
+    if (bits && cover::loadBig(stats.nowId, bits)) {
+      gfx::blit1bit(cx, cy, bits, coverW, coverH);
+    } else {  // no large cover yet: the small one, enlarged
+      uint8_t small[cover::kBytes];
+      if (cover::load(stats.nowId, small)) {
+        const int k = coverW / cover::W;  // 7x
+        for (int y = 0; y < cover::H; y++)
+          for (int x = 0; x < cover::W; x++)
+            if (small[y * (cover::W / 8) + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(cx + x * k, cy + y * k, k, k, true);
+      }
+    }
+    free(bits);
+    drawPetSprite();
+    int ty = cy + coverH + 18;
+    gfx::bigTextCentered(ty, t1, kTitleSize);
+    if (titleLines == 2) gfx::bigTextCentered(ty + kTitleStep, t2, kTitleSize);
+    ty += titleLines * kTitleStep;
+    if (author) {
+      char a1[100];
+      strlcpy(a1, stats.nowAuthor, sizeof(a1));
+      fitBig(a1, gfx::W - 40, kAuthorSize);
+      gfx::bigTextCentered(ty, a1, kAuthorSize);
+      ty += 30;
+    }
+    ty += 18;
+    bar((gfx::W - 260) / 2, ty, 260, 14, pct / 100.0f);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d%%", (int)pct);
+    gfx::bigTextCentered(ty + 14 + 10, buf, 32);
+  } else {
+    drawPetSprite();
+  }
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
+
+static bool ensureReadingCover();
 
 // Loads the settings and prepares the server client. Library mode does this at start-up; going to sleep from the reader does it
 // on demand (reading mode starts without any of it).
@@ -1925,6 +2013,10 @@ static void syncBeforeSleep() {
   flushProgress();
   flushSessions();
   refreshStats();
+  if (stats.readingNow && stats.nowId && !cover::cached(stats.nowId)) {  // the sleep screen shows it: have it ready
+    syncModal("Syncing", "Fetching the cover...");
+    ensureReadingCover();
+  }
   syncModal("Synced", "Going to sleep");
   delay(500);
 }
@@ -1934,6 +2026,8 @@ static void syncBeforeSleep() {
 [[noreturn]] static void goToSleep() {
   Serial.println("sleeping");
   if (reader::isOpen()) {
+    sleepLivePct = reader::progressPercent();
+    sleepLiveFile = readFileId;
     sessionTick();
     checkpoint();
     reader::close();  // saves the position, frees the heap
@@ -2246,6 +2340,7 @@ static void backgroundSync() {
     syncFailed = false;
     net = Net::Online;
     refreshStats();
+    ensureReadingCover();
     if (loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
@@ -2273,28 +2368,35 @@ static void manualSync() {
   flushProgress();
   flushSessions();
   refreshStats();
+  ensureReadingCover();
   syncModal("Synced", "Progress and statistics are up to date");
   delay(900);
   showList(false);
 }
 
-// The cover of the Reading now book is fetched once (one small download, decoded on the spot) while Home is idle and online.
+// Fetches and converts the Reading now cover when it is not cached yet (needs the server). False when that failed.
+static bool ensureReadingCover() {
+  const long id = stats.nowId;
+  if (!stats.readingNow || !id || cover::cached(id)) return true;
+  String error;
+  if (!api.fetchThumbnail(id, cover::stagingPath(), error)) {
+    Serial.printf("cover %ld failed: %s\n", id, error.c_str());
+    if (error.indexOf("404") >= 0) cover::markNone(id);
+    return false;
+  }
+  gfx::setLowMemory(true);  // the decoder wants the RAM the refresh shadow would use
+  const bool ok = cover::convertStaged(id, error);  // an unusable image is marked, not retried
+  gfx::setLowMemory(false);
+  Serial.printf("cover %ld: %s\n", id, ok ? "cached" : error.c_str());
+  return ok;
+}
+
+// The Reading now cover is also fetched while Home is idle and online (a retry after a failure comes a minute later).
 static void fetchReadingCover() {
   static uint32_t retryAfter = 0;
   const long id = stats.nowId;
   if (!stats.readingNow || !id || net != Net::Online || millis() < retryAfter || cover::cached(id)) return;
-  String error;
-  if (api.fetchThumbnail(id, cover::stagingPath(), error)) {
-    gfx::setLowMemory(true);  // the decoder wants the RAM the refresh shadow would use
-    const bool ok = cover::convertStaged(id, error);  // an unusable image is marked, not retried
-    gfx::setLowMemory(false);
-    Serial.printf("cover %ld: %s\n", id, ok ? "cached" : error.c_str());
-    if (ok) showList(false);
-  } else {
-    Serial.printf("cover %ld failed: %s\n", id, error.c_str());
-    if (error.indexOf("404") >= 0) cover::markNone(id);
-    else retryAfter = millis() + 60000;
-  }
+  if (ensureReadingCover()) showList(false); else retryAfter = millis() + 60000;
 }
 
 // True once per click of Back (on release).
