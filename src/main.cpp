@@ -1883,7 +1883,6 @@ static void drawSleepScreen() {
     for (int x = 0; x < 64; x++)
       if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, kPetY + y * kScale, kScale, kScale, true);
   gfx::bigTextCentered(gfx::H / 2 + 40, "BookOrbit", 80);
-  gfx::bigTextCentered(gfx::H / 2 + 160, "Zzz...", 28);
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
