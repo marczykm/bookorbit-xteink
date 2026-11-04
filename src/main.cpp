@@ -401,33 +401,67 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
 
 // Two circular arrows (sync), about 28 px across and centered on (cx, cy).
-static void drawSyncIcon(int cx, int cy, float f, bool slash) {
-  constexpr float kPi = 3.14159265f;
-  const float kR = 9.5f * f, thick = max(1.2f, 1.8f * f);
-  const int reach = (int)(14 * f) + 2;
-  for (int dy = -reach; dy <= reach; dy++)
-    for (int dx = -reach; dx <= reach; dx++) {
-      const float d = sqrtf((float)(dx * dx + dy * dy));
-      if (d < kR - thick || d > kR + thick) continue;
-      float a = atan2f((float)dy, (float)dx) * 180.0f / kPi;  // -180..180, clockwise on screen
-      if (a < 0) a += 360.0f;
-      if ((a > 25 && a < 150) || (a > 205 && a < 330)) gfx::fillRect(cx + dx, cy + dy, 1, 1, true);
+// Icons drawn with float math (slow in software: the C3 has no FPU) are worked out once into a 1-bit mask around their
+// centre and stamped from then on. A mask is keyed by the icon and its scale.
+struct IconMask {
+  int key = -1, r = 0;  // the mask covers -r..r around the centre
+  uint8_t* bits = nullptr;
+};
+static IconMask iconMasks[6];
+
+template <typename Draw>
+static void stampIcon(int key, int r, int cx, int cy, Draw draw) {
+  IconMask* m = nullptr;
+  for (auto& k : iconMasks) if (k.key == key) { m = &k; break; }
+  const int side = 2 * r + 1, stride = (side + 7) / 8;
+  if (!m) {
+    for (auto& k : iconMasks) if (k.key < 0) { m = &k; break; }
+    uint8_t* bits = m ? static_cast<uint8_t*>(calloc(side, stride)) : nullptr;
+    if (!bits) {  // no room to keep it: draw it directly
+      draw([&](int dx, int dy) { gfx::fillRect(cx + dx, cy + dy, 1, 1, true); });
+      return;
     }
-  for (int k = 0; k < 2; k++) {  // an arrow head at the end of each arc, pointing clockwise
-    const float a = (k ? 330.0f : 150.0f) * kPi / 180.0f;
-    const float px = cx + kR * cosf(a), py = cy + kR * sinf(a);
-    const float tx = -sinf(a), ty = cosf(a), nx = cosf(a), ny = sinf(a);  // tangent (direction of travel) and radial
-    const float tipX = px + 6 * f * tx, tipY = py + 6 * f * ty;
-    const float b1x = px - 5 * f * nx, b1y = py - 5 * f * ny, b2x = px + 5 * f * nx, b2y = py + 5 * f * ny;
-    const int r2 = (int)(16 * f) + 2;
-    for (int y = cy - r2; y <= cy + r2; y++)
-      for (int x = cx - r2; x <= cx + r2; x++) {  // inside the triangle (tip, b1, b2)?
-        const float d1 = (x - b2x) * (tipY - b2y) - (tipX - b2x) * (y - b2y);
-        const float d2 = (x - b1x) * (b2y - b1y) - (b2x - b1x) * (y - b1y);
-        const float d3 = (x - tipX) * (b1y - tipY) - (b1x - tipX) * (y - tipY);
-        if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) gfx::fillRect(x, y, 1, 1, true);
-      }
+    draw([&](int dx, int dy) {
+      if (dx >= -r && dx <= r && dy >= -r && dy <= r) bits[(dy + r) * stride + (dx + r) / 8] |= 0x80 >> ((dx + r) & 7);
+    });
+    m->key = key;
+    m->r = r;
+    m->bits = bits;
   }
+  for (int y = 0; y < side; y++)
+    for (int x = 0; x < side; x++)
+      if (m->bits[y * stride + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(cx - r + x, cy - r + y, 1, 1, true);
+}
+
+static void drawSyncIcon(int cx, int cy, float f, bool slash) {
+  stampIcon((int)(f * 100), (int)(16 * f) + 2, cx, cy, [f](auto plot) {
+    constexpr float kPi = 3.14159265f;
+    const float kR = 9.5f * f, thick = max(1.2f, 1.8f * f);
+    const int reach = (int)(14 * f) + 2;
+    for (int dy = -reach; dy <= reach; dy++)
+      for (int dx = -reach; dx <= reach; dx++) {
+        const float d = sqrtf((float)(dx * dx + dy * dy));
+        if (d < kR - thick || d > kR + thick) continue;
+        float a = atan2f((float)dy, (float)dx) * 180.0f / kPi;  // -180..180, clockwise on screen
+        if (a < 0) a += 360.0f;
+        if ((a > 25 && a < 150) || (a > 205 && a < 330)) plot(dx, dy);
+      }
+    for (int k = 0; k < 2; k++) {  // an arrow head at the end of each arc, pointing clockwise
+      const float a = (k ? 330.0f : 150.0f) * kPi / 180.0f;
+      const float px = kR * cosf(a), py = kR * sinf(a);
+      const float tx = -sinf(a), ty = cosf(a), nx = cosf(a), ny = sinf(a);  // tangent (direction of travel) and radial
+      const float tipX = px + 6 * f * tx, tipY = py + 6 * f * ty;
+      const float b1x = px - 5 * f * nx, b1y = py - 5 * f * ny, b2x = px + 5 * f * nx, b2y = py + 5 * f * ny;
+      const int r2 = (int)(16 * f) + 2;
+      for (int y = -r2; y <= r2; y++)
+        for (int x = -r2; x <= r2; x++) {  // inside the triangle (tip, b1, b2)?
+          const float d1 = (x - b2x) * (tipY - b2y) - (tipX - b2x) * (y - b2y);
+          const float d2 = (x - b1x) * (b2y - b1y) - (b2x - b1x) * (y - b1y);
+          const float d3 = (x - tipX) * (b1y - tipY) - (b1x - tipX) * (y - tipY);
+          if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) plot(x, y);
+        }
+    }
+  });
   if (slash) {  // crossed out: a diagonal with a white edge so it reads over the arrows
     const int n = (int)(12 * f);
     for (int i = -n; i <= n; i++) gfx::fillRect(cx + i - 2, cy + i - 3, 6, 7, false);  // the white edge first...
@@ -460,17 +494,19 @@ static void drawHints(bool back = true, bool ok = true, bool paging = true, bool
   if (sync) drawSyncIcon(kButtonX[2] + kButtonW / 2, y + 14, 1.0f, false);
   if (settings) {  // a gear above the fourth button
     const int gx = kButtonX[3] + kButtonW / 2, gy = y + 14;
-    for (int dy = -13; dy <= 13; dy++)
-      for (int dx = -13; dx <= 13; dx++) {
-        const float d = sqrtf((float)(dx * dx + dy * dy));
-        bool on = d <= 9.0f && d >= 4.5f;  // the ring with its hub hole
-        if (!on && d > 9.0f && d <= 13.0f) {  // eight teeth
-          float a = atan2f((float)dy, (float)dx) * 180.0f / (float)PI;  // -180..180
-          a = fmodf(a + 360.0f + 22.5f, 45.0f);
-          on = a > 11.0f && a < 34.0f;
+    stampIcon(1, 13, gx, gy, [](auto plot) {
+      for (int dy = -13; dy <= 13; dy++)
+        for (int dx = -13; dx <= 13; dx++) {
+          const float d = sqrtf((float)(dx * dx + dy * dy));
+          bool on = d <= 9.0f && d >= 4.5f;  // the ring with its hub hole
+          if (!on && d > 9.0f && d <= 13.0f) {  // eight teeth
+            float a = atan2f((float)dy, (float)dx) * 180.0f / (float)PI;  // -180..180
+            a = fmodf(a + 360.0f + 22.5f, 45.0f);
+            on = a > 11.0f && a < 34.0f;
+          }
+          if (on) plot(dx, dy);
         }
-        if (on) gfx::fillRect(gx + dx, gy + dy, 1, 1, true);
-      }
+    });
   }
 }
 

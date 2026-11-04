@@ -35,7 +35,18 @@ struct GlyphBitmap {
   int16_t xoff;           // left bearing from pen position
   int16_t yoff;           // top offset from baseline (negative = above)
   int16_t advance;
+  // BookOrbit patch: 4 = two pixels per byte (high nibble first), coverage scaled to 0-15. Read it with glyphCoverage().
+  uint8_t bitsPerPixel = 8;
 };
+
+// Coverage 0-255 of pixel i (row-major, i = y * width + x) of a glyph, whatever its packing.
+inline uint8_t glyphCoverage(const GlyphBitmap& g, uint32_t i) {
+  if (g.bitsPerPixel == 4) {
+    const uint8_t b = g.pixels[i >> 1];
+    return static_cast<uint8_t>(((i & 1) ? (b & 0x0F) : (b >> 4)) * 17);
+  }
+  return g.pixels[i];
+}
 
 class Font {
  public:

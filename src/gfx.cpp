@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <math.h>
+#include <new>
 #include <FreeInkUIFont.h>
 #include <esp_partition.h>
 #include <render/TtfFont.h>
@@ -13,7 +14,7 @@ const freeink::ui::BitmapFont& font = freeink::ui::kNotoSansFont;
 
 // Optional Noto Serif from the flash `fonts` partition; it has the Polish letters the bitmap font lacks.
 constexpr uint16_t kTtfSize = 22;
-constexpr size_t kTtfArena = 14 * 1024;
+constexpr size_t kTtfArena = 8 * 1024;  // the font's tables and the glyph being rasterized; drawn glyphs live in the 1-bit cache below
 freeink::book::TtfFont ttf;
 freeink::font::Arena ttfArena;
 bool ttfOn = false;
@@ -57,6 +58,95 @@ const freeink::ui::FontGlyph* glyphFor(uint32_t cp) {
 }
 
 int advanceOf(uint32_t cp) { return ttfOn ? face->advance(cp, kTtfSize, 0) : glyphFor(cp)->xAdvance; }
+
+// UI glyphs kept as 1-bit bitmaps (the font's own cache is small and keeps one size well, while the screens mix five sizes,
+// so it re-rasterized most glyphs on every redraw). Only the UI's own face is cached, not one lent by the reader.
+struct Glyph1 {
+  uint32_t key = 0;  // codepoint << 8 | size, 0 = empty
+  uint16_t off = 0;  // in the pool
+  uint8_t w = 0, h = 0;
+  int8_t xoff = 0, yoff = 0;
+};
+constexpr int kGlyphSlots = 512;      // open addressing, a power of two
+constexpr size_t kGlyphPool = 12 * 1024;
+Glyph1* glyphSlots = nullptr;
+uint8_t* glyphPool = nullptr;
+size_t glyphUsed = 0;
+// The cache is made only once the 48 KB refresh shadow exists (an async refresh started), and freed with it in low-memory
+// mode, so it never takes the contiguous block the shadow needs.
+bool glyphCacheAllowed = false;
+
+void flushGlyphCache() {
+  for (int i = 0; i < kGlyphSlots; i++) glyphSlots[i].key = 0;
+  glyphUsed = 0;
+}
+
+// The cached glyph, rasterizing it on a miss; nullptr when the glyph is missing or nothing can be cached.
+void freeGlyphCache() {
+  delete[] glyphSlots;
+  free(glyphPool);
+  glyphSlots = nullptr;
+  glyphPool = nullptr;
+  glyphUsed = 0;
+}
+
+bool makeGlyphCache() {
+  if (glyphSlots) return true;
+  if (!glyphCacheAllowed || !ttfOnOwn || ESP.getMaxAllocHeap() < 24 * 1024) return false;
+  glyphSlots = new (std::nothrow) Glyph1[kGlyphSlots];
+  glyphPool = glyphSlots ? static_cast<uint8_t*>(malloc(kGlyphPool)) : nullptr;
+  if (!glyphPool) freeGlyphCache();
+  return glyphSlots != nullptr;
+}
+
+const Glyph1* glyph1(uint32_t cp, int size) {
+  if (face != &ttf || !makeGlyphCache() || size > 255 || cp > 0xFFFFFF) return nullptr;
+  const uint32_t key = cp << 8 | size;
+  uint32_t i = (cp * 31 + size) & (kGlyphSlots - 1);
+  Glyph1* slot = nullptr;
+  for (int probe = 0; probe < 8; probe++, i = (i + 1) & (kGlyphSlots - 1)) {
+    if (glyphSlots[i].key == key) return &glyphSlots[i];
+    if (glyphSlots[i].key == 0) { slot = &glyphSlots[i]; break; }
+  }
+  const auto* g = face->rasterize(cp, size);
+  if (!g || g->width > 255 || g->height > 255) return nullptr;
+  const int stride = (g->width + 7) / 8;
+  const size_t bytes = (size_t)stride * g->height;
+  if (!slot || glyphUsed + bytes > kGlyphPool) {  // full: start over (the glyph just rasterized is still valid)
+    flushGlyphCache();
+    slot = &glyphSlots[(cp * 31 + size) & (kGlyphSlots - 1)];
+  }
+  uint8_t* bits = glyphPool + glyphUsed;
+  memset(bits, 0, bytes);
+  for (int row = 0; row < g->height; row++)
+    for (int col = 0; col < g->width; col++)
+      if (freeink::font::glyphCoverage(*g, row * g->width + col) > 110) bits[row * stride + col / 8] |= 0x80 >> (col & 7);
+  slot->key = key;
+  slot->off = glyphUsed;
+  slot->w = g->width;
+  slot->h = g->height;
+  slot->xoff = g->xoff;
+  slot->yoff = g->yoff;
+  glyphUsed += bytes;
+  return slot;
+}
+
+// Draws one TTF glyph with its origin on the baseline at (x, baseline).
+void ttfGlyph(int x, int baseline, uint32_t cp, int size, bool black) {
+  if (const Glyph1* c = glyph1(cp, size)) {
+    const int stride = (c->w + 7) / 8;
+    const uint8_t* bits = glyphPool + c->off;
+    for (int row = 0; row < c->h; row++)
+      for (int col = 0; col < c->w; col++)
+        if (bits[row * stride + col / 8] & (0x80 >> (col & 7))) setPixel(x + c->xoff + col, baseline + c->yoff + row, black);
+    return;
+  }
+  if (const auto* g = face->rasterize(cp, size)) {
+    for (int row = 0; row < g->height; row++)
+      for (int col = 0; col < g->width; col++)
+        if (freeink::font::glyphCoverage(*g, row * g->width + col) > 110) setPixel(x + g->xoff + col, baseline + g->yoff + row, black);
+  }
+}
 }  // namespace
 
 void begin(EInkDisplay* display) { disp = display; }
@@ -106,9 +196,25 @@ void blit1bit(int x, int y, const uint8_t* bits, int w, int h) {
     for (int i = 0; i < w; i++) setPixel(x + i, y + j, bits[j * stride + i / 8] & (0x80 >> (i & 7)));
 }
 
+// A portrait column is a run of bits in one panel row, so each column is filled a byte at a time.
 void fillRect(int x, int y, int w, int h, bool black) {
-  for (int j = 0; j < h; j++)
-    for (int i = 0; i < w; i++) setPixel(x + i, y + j, black);
+  const int x0 = max(x, 0), x1 = min(x + w, W), y0 = max(y, 0), y1 = min(y + h, H);
+  if (x0 >= x1 || y0 >= y1) return;
+  uint8_t* fb = disp->getFrameBuffer();
+  const int wb = disp->getDisplayWidthBytes(), ph = disp->getDisplayHeight();
+  const int b0 = y0 >> 3, b1 = (y1 - 1) >> 3;
+  const uint8_t m0 = 0xFF >> (y0 & 7), m1 = (uint8_t)(0xFF << (7 - ((y1 - 1) & 7)));
+  for (int xx = x0; xx < x1; xx++) {
+    uint8_t* row = fb + (ph - 1 - xx) * wb;
+    if (b0 == b1) {
+      const uint8_t m = m0 & m1;
+      if (black) row[b0] &= ~m; else row[b0] |= m;
+      continue;
+    }
+    if (black) row[b0] &= ~m0; else row[b0] |= m0;
+    if (b1 - b0 > 1) memset(row + b0 + 1, black ? 0x00 : 0xFF, b1 - b0 - 1);
+    if (black) row[b1] &= ~m1; else row[b1] |= m1;
+  }
 }
 
 int lineHeight() { return ttfOn ? face->lineHeight(kTtfSize) : font.yAdvance; }
@@ -124,11 +230,7 @@ void text(int x, int y, const char* s, bool black) {
   while (*s) {
     if (ttfOn) {
       const uint32_t cp = nextChar(s);
-      if (const auto* g = face->rasterize(cp, kTtfSize)) {
-        for (int row = 0; row < g->height; row++)
-          for (int col = 0; col < g->width; col++)
-            if (g->pixels[row * g->width + col] > 110) setPixel(x + g->xoff + col, baseline + g->yoff + row, black);
-      }
+      ttfGlyph(x, baseline, cp, kTtfSize, black);
       x += face->advance(cp, kTtfSize, 0);
       continue;
     }
@@ -156,11 +258,7 @@ void bigText(int x, int y, const char* s, int sizePx, bool black) {
     const int baseline = y + face->ascent(sizePx);
     for (const char* p = s; *p;) {
       const uint32_t cp = nextChar(p);
-      if (const auto* g = face->rasterize(cp, sizePx)) {
-        for (int row = 0; row < g->height; row++)
-          for (int col = 0; col < g->width; col++)
-            if (g->pixels[row * g->width + col] > 110) setPixel(x + g->xoff + col, baseline + g->yoff + row, black);
-      }
+      ttfGlyph(x, baseline, cp, sizePx, black);
       x += face->advance(cp, sizePx, 0);
     }
     return;
@@ -230,10 +328,19 @@ const char* ellipsize(const char* s, int maxWidth) {
   return out;
 }
 
-void flush(EInkDisplay::RefreshMode mode) { disp->displayBufferAsync(mode); }  // falls back to blocking if RAM is short
+void flush(EInkDisplay::RefreshMode mode) {
+  disp->displayBufferAsync(mode);  // falls back to blocking if RAM is short
+  if (disp->asyncShadowReady()) glyphCacheAllowed = true;  // the shadow is in place: the cache can't take its block now
+}
 bool busy() { return disp->refreshBusy(); }
 void waitIdle() { disp->waitRefreshComplete(); }
-void setLowMemory(bool on) { disp->setAsyncShadowAllowed(!on); }
+void setLowMemory(bool on) {
+  if (on) {
+    freeGlyphCache();
+    glyphCacheAllowed = false;
+  }
+  disp->setAsyncShadowAllowed(!on);
+}
 
 void dumpFramebuffer() {
   Serial.println("FB-BEGIN");

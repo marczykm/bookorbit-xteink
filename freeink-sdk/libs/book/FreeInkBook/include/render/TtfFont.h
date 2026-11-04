@@ -13,12 +13,15 @@
 // Preserve the per-profile glyph/advance cache sizing the engine used when it
 // lived in FreeInkBook (see the old TtfFont.h). Define before including the
 // font library header so its #ifndef guards pick these up.
+// BookOrbit patch: only when the build doesn't set them (they must be the same in every compile unit).
+#if !defined(FREEINK_FONT_ADVANCE_SLOTS) && !defined(FREEINK_FONT_GLYPH_SLOTS)
 #if FREEINK_BOOK_PROFILE == FREEINK_BOOK_PROFILE_SMALL
 #define FREEINK_FONT_ADVANCE_SLOTS 256
 #define FREEINK_FONT_GLYPH_SLOTS 64
 #elif FREEINK_BOOK_PROFILE == FREEINK_BOOK_PROFILE_LARGE
 #define FREEINK_FONT_ADVANCE_SLOTS 2048
 #define FREEINK_FONT_GLYPH_SLOTS 512
+#endif
 #endif
 
 #include <TtfFont.h>

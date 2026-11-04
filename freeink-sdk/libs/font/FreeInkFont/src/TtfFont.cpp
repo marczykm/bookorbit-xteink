@@ -48,10 +48,10 @@ bool TtfFont::init(const uint8_t* data, uint32_t len, Arena& glyphArena) {
 
   glyphArena_ = &glyphArena;
   advances_ = glyphArena.allocArray<AdvanceSlot>(kAdvanceSlots);
-  glyphs_ = glyphArena.allocArray<GlyphSlot>(kGlyphSlots);
+  glyphs_ = glyphArena.allocArray<GlyphSlot>(glyphSlotCount_);
   if (advances_ == nullptr || glyphs_ == nullptr) return false;
   for (uint32_t i = 0; i < kAdvanceSlots; ++i) advances_[i] = AdvanceSlot{};
-  for (uint32_t i = 0; i < kGlyphSlots; ++i) glyphs_[i] = GlyphSlot{};
+  for (uint32_t i = 0; i < glyphSlotCount_; ++i) glyphs_[i] = GlyphSlot{};
   glyphBase_ = glyphArena.mark();
 
   ready_ = true;
@@ -132,14 +132,24 @@ uint32_t TtfFont::ligature(uint32_t left, uint32_t right, uint8_t styleFlags) {
 
 void TtfFont::flushGlyphs() {
   glyphArena_->release(glyphBase_);
-  for (uint32_t i = 0; i < kGlyphSlots; ++i) glyphs_[i] = GlyphSlot{};
+  for (uint32_t i = 0; i < glyphSlotCount_; ++i) glyphs_[i] = GlyphSlot{};
 }
 
 const GlyphBitmap* TtfFont::rasterize(uint32_t codepoint, uint16_t sizePx) {
   if (!ready_) return nullptr;
   const uint64_t key = (static_cast<uint64_t>(codepoint) << 16) | sizePx;
-  GlyphSlot& slot = glyphs_[(codepoint * 31 + sizePx) % kGlyphSlots];
-  if (slot.key == key) return &slot.glyph;
+  // BookOrbit patch: open addressing (a short linear probe) instead of one slot per hash, so glyphs whose codepoints
+  // differ by the table size (',' and 'l', '.' and 'n' with 64 slots) no longer evict each other on every page.
+  const uint32_t mask = glyphSlotCount_ - 1;
+  const uint32_t home = (codepoint * 31 + sizePx) & mask;
+  GlyphSlot* slot = nullptr;
+  for (uint32_t probe = 0, i = home; probe < 8; ++probe, i = (i + 1) & mask) {
+    if (glyphs_[i].key == key) return &glyphs_[i].glyph;
+    if (glyphs_[i].key == UINT64_MAX) {
+      slot = &glyphs_[i];
+      break;
+    }
+  }
 
   // Shares the advance cache with hasGlyph()/advance(), so the cmap lookup that
   // hasGlyph() just performed for this codepoint is not repeated here.
@@ -155,15 +165,30 @@ const GlyphBitmap* TtfFont::rasterize(uint32_t codepoint, uint16_t sizePx) {
   const int w = x1 - x0;
   const int h = y1 - y0;
 
+  if (slot == nullptr) {  // the probe found no free slot: start a fresh cache generation
+    flushGlyphs();
+    slot = &glyphs_[home];
+  }
   uint8_t* pixels = nullptr;
   if (w > 0 && h > 0) {
+    size_t base = glyphArena_->mark();
     pixels = static_cast<uint8_t*>(glyphArena_->alloc(static_cast<size_t>(w) * h, 1));
     if (pixels == nullptr) {
       flushGlyphs();  // arena full — start a fresh cache generation
+      slot = &glyphs_[home];
+      base = glyphArena_->mark();
       pixels = static_cast<uint8_t*>(glyphArena_->alloc(static_cast<size_t>(w) * h, 1));
       if (pixels == nullptr) return nullptr;  // single glyph bigger than arena
     }
     stbtt_MakeGlyphBitmap(fontOf(fontInfo_), pixels, w, h, w, scale, scale, glyph);
+    if (packed_) {  // two pixels per byte, in place (byte i/2 is never ahead of pixel i), then give back the rest
+      const uint32_t n = static_cast<uint32_t>(w) * h;
+      for (uint32_t i = 0; i < n; i += 2) {
+        const uint8_t hi = pixels[i] >> 4, lo = i + 1 < n ? pixels[i + 1] >> 4 : 0;
+        pixels[i >> 1] = static_cast<uint8_t>(hi << 4 | lo);
+      }
+      glyphArena_->release(base + (n + 1) / 2);
+    }
   }
 
   // glyphIndexFor() above already read hmtx for this codepoint and cached the
@@ -171,14 +196,15 @@ const GlyphBitmap* TtfFont::rasterize(uint32_t codepoint, uint16_t sizePx) {
   // still the one just filled even if the arena recycled mid-rasterize.
   const int32_t adv = advances_[codepoint % kAdvanceSlots].unscaledAdvance;
 
-  slot.key = key;
-  slot.glyph.pixels = pixels;
-  slot.glyph.width = static_cast<uint16_t>(w > 0 ? w : 0);
-  slot.glyph.height = static_cast<uint16_t>(h > 0 ? h : 0);
-  slot.glyph.xoff = static_cast<int16_t>(x0);
-  slot.glyph.yoff = static_cast<int16_t>(y0);
-  slot.glyph.advance = static_cast<int16_t>(adv * scale + 0.5f);
-  return &slot.glyph;
+  slot->key = key;
+  slot->glyph.pixels = pixels;
+  slot->glyph.width = static_cast<uint16_t>(w > 0 ? w : 0);
+  slot->glyph.height = static_cast<uint16_t>(h > 0 ? h : 0);
+  slot->glyph.xoff = static_cast<int16_t>(x0);
+  slot->glyph.yoff = static_cast<int16_t>(y0);
+  slot->glyph.advance = static_cast<int16_t>(adv * scale + 0.5f);
+  slot->glyph.bitsPerPixel = packed_ ? 4 : 8;
+  return &slot->glyph;
 }
 
 // --- FontChain -----------------------------------------------------------------

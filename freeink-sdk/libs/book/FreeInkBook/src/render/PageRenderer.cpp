@@ -186,10 +186,10 @@ uint32_t PageRenderer::renderText(const Page& page, FontChain& fonts, const Fram
             (run.styleFlags & StyleBold) != 0 && (faceFlags & StyleBold) == 0 ? 2 : 1;
         for (int s = 0; s < strikes; ++s) {
           for (uint16_t gy = 0; gy < glyph->height; ++gy) {
-            const uint8_t* srcRow = glyph->pixels + static_cast<uint32_t>(gy) * glyph->width;
+            const uint32_t row = static_cast<uint32_t>(gy) * glyph->width;
             const int32_t dy = run.baselineY + glyph->yoff + gy;
             for (uint16_t gx = 0; gx < glyph->width; ++gx) {
-              inkPixel(target, penX + glyph->xoff + gx + s, dy, srcRow[gx]);
+              inkPixel(target, penX + glyph->xoff + gx + s, dy, glyphCoverage(*glyph, row + gx));
             }
           }
         }

@@ -30,7 +30,9 @@ constexpr size_t kIndexArena = 4 * 1024;     // page index of the open chapter
 constexpr size_t kSheetArena = 6 * 1024;     // book CSS
 constexpr uint32_t kFontFingerprintBitmap = 0xB00C0001;  // built-in ASCII font
 constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the flash `fonts` partition; bump when it changes
-constexpr size_t kFaceArena[3] = {14 * 1024, 8 * 1024, 8 * 1024};  // glyph caches: regular, bold, italic
+// Glyph caches: regular, bold, italic. The glyphs are kept at 4 bits; the regular face has 256 slots (a page with its header and
+// footer uses ~110 regular glyphs), the others the default 64.
+constexpr size_t kFaceArena[3] = {18 * 1024, 6 * 1024, 6 * 1024};
 
 constexpr const char* kFontSizeFile = "/BookOrbit/.fontsize";
 constexpr const char* kMarginFile = "/BookOrbit/.margin";
@@ -228,6 +230,8 @@ bool loadFonts(State& s) {
     if (style > 2 || offset + length > part->size) continue;  // bold-italic has no cache budget; the chain falls back
     if (!s.faceBuf[style]) { Serial.printf("fonts: no heap for face %u\n", (unsigned)style); return false; }
     s.faceArena[style].init(s.faceBuf[style], kFaceArena[style]);
+    s.faces[style].setPackedGlyphs(true);
+    if (style == 0) s.faces[style].setGlyphSlots(256);
     if (!s.faces[style].init(pack + offset, length, s.faceArena[style])) { Serial.printf("fonts: face %u init failed\n", (unsigned)style); return false; }
     s.faces[style].setEmSizing(true);
     if (!s.fonts.add(&s.faces[style], static_cast<uint8_t>(style))) return false;

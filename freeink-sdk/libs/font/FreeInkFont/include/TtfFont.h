@@ -31,6 +31,11 @@
 
 
 #include "FontArena.h"
+
+#ifndef FREEINK_FONT_GLYPH_SLOTS
+#define FREEINK_FONT_GLYPH_SLOTS 128
+#endif
+#define FREEINK_FONT_GLYPH_SLOTS_DEFAULT FREEINK_FONT_GLYPH_SLOTS
 #include "Font.h"
 
 namespace freeink {
@@ -48,6 +53,10 @@ class TtfFont : public RasterFont {
   // font-size, and what LVGL's lv_font_conv --size means, so a pixel font
   // drawn at its em lands on its own grid. Set before the first use.
   void setEmSizing(bool em) { emSizing_ = em; }
+  // BookOrbit patch, both before init(): the number of cached glyphs (a power of two; the slots live in the arena) and
+  // 4-bit glyph storage (half the arena per glyph; read the pixels with glyphCoverage()).
+  void setGlyphSlots(uint32_t count) { glyphSlotCount_ = count; }
+  void setPackedGlyphs(bool packed) { packed_ = packed; }
 
   bool hasGlyph(uint32_t codepoint) const override;
 
@@ -70,6 +79,8 @@ class TtfFont : public RasterFont {
 
  private:
   bool emSizing_ = false;
+  bool packed_ = false;
+  uint32_t glyphSlotCount_ = FREEINK_FONT_GLYPH_SLOTS_DEFAULT;
   struct AdvanceSlot {
     uint32_t key = 0xFFFFFFFF;  // codepoint
     int32_t glyphIndex = 0;

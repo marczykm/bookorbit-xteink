@@ -178,6 +178,8 @@ class FreeInkDisplay {
   // BookOrbit patch: with allowed = false the single-buffer async shadow (48 KB) is freed at once and not allocated again, so
   // displayBufferAsync() falls back to a blocking refresh. Lets the Wi-Fi stack have the RAM during transfers.
   void setAsyncShadowAllowed(bool allowed);
+  // BookOrbit patch: true while the async shadow is allocated.
+  bool asyncShadowReady() const { return _asyncShadow != nullptr; }
   // Async refresh without the single-buffer shadow (no extra RAM). The caller
   // promises (a) not to touch the framebuffer until the refresh completes
   // (waitRefreshComplete() / refreshBusy()==false / any blocking call), and
