@@ -46,7 +46,11 @@ Settings live in `/bookorbit.json` on the SD card (see `config.example.json`). T
     .venv/bin/python tools/provision.py PORT SSID WIFI_PASSWORD SERVER USERNAME PASSWORD
 
 ## Build / flash
-**Release image (Xteink X4):** `bookorbit-x4-<version>.bin` from the Releases page is a complete 16 MB layout (bootloader, partitions, app and fonts). Back up the stock firmware first, then: `esptool --chip esp32c3 --port /dev/cu.usbmodemXXXX write-flash 0x0 bookorbit-x4-0.0.1.bin`. Put `config.json` (see `config.example.json`) on the SD card as `/bookorbit.json`.
+**Release image (Xteink X4):** `bookorbit-x4-<version>.bin` from the Releases page is a complete 16 MB layout (bootloader, partitions, app and fonts). **Updating from the device:** Settings > Update checks the latest GitHub release and, on OK, downloads its `bookorbit-x4-<version>-ota.bin` into the spare app slot (two 3.5 MB slots, see `partitions.csv`) and restarts into it. The first install of this layout needs the full image over USB; after that updates need only Wi-Fi. The fonts partition is not touched by an update.
+
+**Releasing:** set `FW_VERSION` in `platformio.ini`, commit, then `tools/release.sh` builds the images and publishes the `v<version>` release with `bookorbit-x4-<version>.bin` (full image) and `bookorbit-x4-<version>-ota.bin` (update image).
+
+Back up the stock firmware first, then: `esptool --chip esp32c3 --port /dev/cu.usbmodemXXXX write-flash 0x0 bookorbit-x4-0.0.1.bin`. Put `config.json` (see `config.example.json`) on the SD card as `/bookorbit.json`.
 
 Flash layout is in `partitions.csv` (7 MB app, 1 MB `fonts` partition). After flashing the firmware once, write the fonts:
 

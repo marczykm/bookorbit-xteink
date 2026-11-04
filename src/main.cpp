@@ -13,6 +13,7 @@
 #include "cover.h"
 #include "pets.h"
 #include "gfx.h"
+#include "updater.h"
 #include "reader.h"
 #include <ArduinoJson.h>
 
@@ -254,7 +255,7 @@ bool halfNext = false;  // the next full draw (a screen change) uses the gentler
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
 constexpr const char* kKeyboardFile = "/BookOrbit/.keyboard";
-int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer
+int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer, update
 int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
@@ -939,15 +940,15 @@ static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
   // Rows are grouped under section headings; settingsSel counts rows only.
-  const char* sectionOf[7] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr};  // heading above the row
-  const char* names[7] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after"};
+  const char* sectionOf[8] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr, "Firmware"};  // heading above the row
+  const char* names[8] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after", "Update"};
   String sleepText = String(sleepMinutes) + " min";
   String stars;
   for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
-  const String values[7] = {config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText};
+  const String values[8] = {config.ssid, config.server, config.username, stars, kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText, String("v") + updater::currentVersion()};
   constexpr int kRowH = 52, kRowPitch = 58, kHeadingH = 34;
   int y = 60;
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (sectionOf[i]) {  // a heading: the name in capitals, then a rule to the edge
       String h = sectionOf[i];
       h.toUpperCase();
@@ -2431,6 +2432,61 @@ static bool backClicked() {
   return true;
 }
 
+static void updateProgress(int percent) {
+  char line[48];
+  snprintf(line, sizeof(line), "%d%%  (keep the device on)", percent);
+  gfx::modal("Updating", line);
+}
+
+// Settings > Update: checks the latest GitHub release and, on OK, installs its image into the spare app slot and restarts.
+static void firmwareUpdate() {
+  String error;
+  if (!goOnline(error)) {
+    syncModal("Offline", error);
+    delay(1800);
+    showList(false);
+    return;
+  }
+  syncModal("Update", "Checking for updates...");
+  updater::Info info;
+  gfx::setLowMemory(true);
+  const int found = updater::check(info, error);
+  gfx::setLowMemory(false);
+  if (found <= 0) {
+    if (found < 0) syncModal("Update failed", error); else syncModal("Up to date", String("Version ") + updater::currentVersion());
+    delay(1800);
+    showList(false);
+    return;
+  }
+  char line[64];
+  snprintf(line, sizeof(line), "Version %s: OK installs", info.version);
+  gfx::modal("Update available", line);
+  for (;;) {
+    handleSerial();
+    lastActivity = millis();
+    if (pressed(InputManager::BTN_CONFIRM)) break;
+    if (backClicked()) {
+      showList(false);
+      return;
+    }
+    delay(10);
+  }
+  syncModal("Updating", "0%  (keep the device on)");
+  gfx::setLowMemory(true);
+  const bool ok = updater::install(info, updateProgress, error);
+  gfx::setLowMemory(false);
+  if (!ok) {
+    Serial.printf("update failed: %s\n", error.c_str());
+    syncModal("Update failed", error);
+    delay(2500);
+    showList(false);
+    return;
+  }
+  syncModal("Updated", "Restarting...");
+  delay(1200);
+  ESP.restart();
+}
+
 void loop() {
   handleSerial();
   if (anyCount || injected >= 0) {
@@ -2580,10 +2636,10 @@ void loop() {
       screen = Screen::Home;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN)) {
-      settingsSel = (settingsSel + 1) % 7;
+      settingsSel = (settingsSel + 1) % 8;
       showList(false);
     } else if (pressed(InputManager::BTN_UP)) {
-      settingsSel = (settingsSel + 6) % 7;
+      settingsSel = (settingsSel + 7) % 8;
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (settingsSel == 0) {
@@ -2594,6 +2650,8 @@ void loop() {
         openKeyboard(KbUsername, config.username);
       } else if (settingsSel == 3) {
         openKeyboard(KbPassword, config.password);
+      } else if (settingsSel == 7) {
+        firmwareUpdate();
       } else {
         openPicker(settingsSel == 4 ? 2 : settingsSel == 5 ? 0 : 1);
         showList(false);
