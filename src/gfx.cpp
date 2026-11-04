@@ -269,11 +269,33 @@ void fadeBackground() {
 void modal(const char* title, const char* body) {
   waitIdle();
   fadeBackground();
-  const int w = 300, h = 80, x = (W - w) / 2, y = 330, r = 10;
+  // The body wraps onto up to four lines (at word breaks); the box grows with it.
+  constexpr int kLines = 4, kMax = 96;
+  const int w = 300, textW = w - 24;
+  char lines[kLines][kMax] = {};
+  int n = 0;
+  String rest = body;
+  while (rest.length() && n < kLines) {
+    int cut = rest.length();
+    while (cut > 0 && bigTextWidth(rest.substring(0, cut).c_str(), 17) > textW) {
+      int sp = rest.lastIndexOf(' ', cut - 1);
+      cut = sp > 0 ? sp : cut - 1;
+    }
+    if (cut <= 0) cut = 1;
+    strlcpy(lines[n++], rest.substring(0, cut).c_str(), kMax);
+    rest = rest.substring(cut);
+    rest.trim();
+  }
+  if (rest.length() && n == kLines) {  // still more: end the last line with "..."
+    const String last = String(lines[kLines - 1]) + " " + rest;
+    strlcpy(lines[kLines - 1], ellipsize(last.c_str(), textW), kMax);
+  }
+  if (n == 0) n = 1;
+  const int h = 58 + 22 * n, x = (W - w) / 2, y = 330 - (n - 1) * 11, r = 10;
   roundRect(x, y, w, h, r, true);
   roundRect(x + 2, y + 2, w - 4, h - 4, r - 2, false);
   bigTextCentered(y + 10, title, 22);
-  bigTextCentered(y + 44, ellipsize(body, w - 24), 17);
+  for (int i = 0; i < n; i++) bigTextCentered(y + 44 + i * 22, lines[i], 17);
   flush(EInkDisplay::FAST_REFRESH);
 }
 }  // namespace gfx

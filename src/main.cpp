@@ -319,6 +319,7 @@ static void handleSerial() {
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
+      if (line.startsWith("MODAL:")) gfx::modal("Update failed", line.substring(6).c_str());  // test hook: a notice box with this text
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
       if (line == "CLOSEMOCK") { extern void testCloseMock(); testCloseMock(); }  // test hook: the screen shown while leaving a book
       if (line == "SLEEPSYNC") drawSleepScreen(1);   // test hook: the mock shown while the sync before sleep runs

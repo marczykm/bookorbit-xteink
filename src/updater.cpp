@@ -41,7 +41,7 @@ bool open(HTTPClient& http, Conn& conn, const String& url, String& error) {
   }
   http.setConnectTimeout(15000);
   http.setTimeout(15000);
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // install() turns this off and follows by hand
   http.setUserAgent("bookorbit-xteink");
   if (!(https ? http.begin(conn.tls, url) : http.begin(conn.plain, url))) {
     error = "Bad update address";
@@ -103,13 +103,40 @@ int check(Info& info, String& error) {
   return -1;
 }
 
-bool install(const Info& info, void (*progress)(int), String& error) {
+namespace {
+struct Hop {
   HTTPClient http;
   Conn conn;
-  if (!open(http, conn, info.url, error)) return false;
-  const int code = http.GET();
+};
+}  // namespace
+
+bool install(const Info& info, void (*progress)(int), String& error) {
+  // Redirects are followed by hand with a fresh connection each (the TLS client loses its CA bundle when reused for another host).
+  Hop* hop = nullptr;
+  String url = info.url;
+  int code = 0;
+  for (int i = 0; i < 5; i++) {
+    delete hop;
+    hop = new Hop;
+    hop->http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    if (!open(hop->http, hop->conn, url, error)) {
+      delete hop;
+      return false;
+    }
+    hop->http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    code = hop->http.GET();
+    if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308) break;
+    url = hop->http.getLocation();
+    hop->http.end();
+    if (!url.length()) break;
+  }
+  HTTPClient& http = hop->http;
+  struct Free {
+    Hop* h;
+    ~Free() { delete h; }
+  } freeHop{hop};
   if (code != 200) {
-    error = code > 0 ? "Download failed (" + String(code) + ")" : "Could not reach the download";
+    error = code > 0 ? "Download failed (" + String(code) + ")" : "Download failed: " + HTTPClient::errorToString(code);
     http.end();
     return false;
   }
