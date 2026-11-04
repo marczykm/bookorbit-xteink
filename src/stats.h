@@ -2,13 +2,18 @@
 // The Home statistics: the same dashboard widgets as the Android app, plus the book being read, cached on the SD card.
 #include <Arduino.h>
 
-class BookOrbit;
+#include "bookorbit.h"
+
+// A book in progress, as Home's Reading now card and the sleep screen show it.
+struct NowBook : Book {
+  float progress = 0;  // 0-100
+};
 
 struct Stats {
-  bool readingNow = false;
-  long nowId = 0, nowFileId = 0;
-  char nowTitle[96] = "", nowAuthor[64] = "";
-  float nowProgress = 0;
+  static constexpr int kMaxNow = 5;
+  NowBook now[kMaxNow];  // most recently read first
+  int nowCount = 0;
+  bool readingNow() const { return nowCount > 0; }
   bool streak = false, goal = false, rhythm = false, projection = false, challenge = false, overview = false;
   int streakDays = 0, longest = 0;
   bool week[7] = {};
@@ -20,7 +25,7 @@ struct Stats {
   int chProgress = 0, chTarget = 1;
   bool chDone = false;
   int books = 0, authors = 0, series = 0, addedYear = 0;
-  bool any() const { return readingNow || streak || goal || rhythm || projection || challenge || overview; }
+  bool any() const { return readingNow() || streak || goal || rhythm || projection || challenge || overview; }
 };
 extern Stats stats;
 

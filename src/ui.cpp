@@ -93,7 +93,7 @@ void drawSyncIcon(int cx, int cy, float f, bool slash) {
   }
 }
 
-void drawHints(bool back, bool ok, bool paging, bool settings, bool sync) {
+void drawHints(bool back, bool ok, bool paging, bool menu) {
   const int top = gfx::H - 52, y = gfx::H - 42;
   gfx::fillRect(0, top, gfx::W, 2, true);
   const auto center = [](int i, int w) { return buttonX(i) + (buttonW() - w) / 2; };
@@ -104,6 +104,9 @@ void drawHints(bool back, bool ok, bool paging, bool settings, bool sync) {
     gfx::fillRect(bx + 8, by - 1, 20, 3, true);
     gfx::fillRect(bx + 26, by - 1, 3, 15, true);
     gfx::fillRect(bx + 10, by + 11, 19, 3, true);
+  } else if (menu) {  // the same button opening a menu: three bars
+    const int mx = center(0, 24);
+    for (int i = 0; i < 3; i++) gfx::fillRect(mx, y + 5 + i * 8, 24, 3, true);
   }
   // OK: a solid tick.
   const int ox = buttonX(1) + buttonW() / 2, oy = y + 14;
@@ -114,23 +117,6 @@ void drawHints(bool back, bool ok, bool paging, bool settings, bool sync) {
   if (paging) {
     triangle(buttonX(2) + buttonW() / 2, y + 14, Dir::Left, true);
     triangle(buttonX(3) + buttonW() / 2, y + 14, Dir::Right, true);
-  }
-  if (sync) drawSyncIcon(buttonX(2) + buttonW() / 2, y + 14, 1.0f, false);
-  if (settings) {  // a gear above the fourth button
-    const int gx = buttonX(3) + buttonW() / 2, gy = y + 14;
-    stampIcon(1, 13, gx, gy, [](auto plot) {
-      for (int dy = -13; dy <= 13; dy++)
-        for (int dx = -13; dx <= 13; dx++) {
-          const float d = sqrtf((float)(dx * dx + dy * dy));
-          bool on = d <= 9.0f && d >= 4.5f;  // the ring with its hub hole
-          if (!on && d > 9.0f && d <= 13.0f) {  // eight teeth
-            float a = atan2f((float)dy, (float)dx) * 180.0f / (float)PI;  // -180..180
-            a = fmodf(a + 360.0f + 22.5f, 45.0f);
-            on = a > 11.0f && a < 34.0f;
-          }
-          if (on) plot(dx, dy);
-        }
-    });
   }
 }
 

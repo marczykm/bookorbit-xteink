@@ -16,13 +16,19 @@ static void parseStats(const String& json) {
   stats = Stats();
   JsonDocument doc;
   if (deserializeJson(doc, json)) return;
-  if (JsonObject d = doc["reading-now"]; !d.isNull()) {
-    stats.readingNow = true;
-    stats.nowId = d["id"] | 0L;
-    stats.nowFileId = d["fileId"] | 0L;
-    strlcpy(stats.nowTitle, d["title"] | "", sizeof(stats.nowTitle));
-    strlcpy(stats.nowAuthor, d["author"] | "", sizeof(stats.nowAuthor));
-    stats.nowProgress = d["progress"] | 0.0f;
+  const auto addNow = [](JsonObject d) {
+    if (d.isNull() || stats.nowCount == Stats::kMaxNow) return;
+    NowBook& b = stats.now[stats.nowCount++];
+    b.id = d["id"] | 0L;
+    b.fileId = d["fileId"] | 0L;
+    strlcpy(b.title, d["title"] | "", sizeof(b.title));
+    strlcpy(b.author, d["author"] | "", sizeof(b.author));
+    b.progress = d["progress"] | 0.0f;
+  };
+  if (JsonArray books = doc["reading-now"]; !books.isNull()) {
+    for (JsonObject d : books) addNow(d);
+  } else {
+    addNow(doc["reading-now"]);  // a cache from 0.0.9 or older: one book
   }
   if (JsonObject d = doc["reading-streak"]; !d.isNull()) {
     stats.streak = true;
@@ -75,19 +81,23 @@ bool refreshStats(BookOrbit& api) {
     Serial.printf("stats: %s\n", error.c_str());
     return false;
   }
-  Book now;
-  float nowProgress = 0;
-  bool found = false;
-  const bool contOk = api.fetchContinueReading(now, nowProgress, found, error);
-  Serial.printf("continue reading: %s%s\n", contOk ? (found ? "found: " : "nothing in progress") : "request failed: ", contOk ? (found ? now.title : "") : error.c_str());
-  if (contOk && found) {  // add the book being read to the cached document
+  Book now[Stats::kMaxNow];
+  float progress[Stats::kMaxNow];
+  const int n = api.fetchContinueReading(now, progress, Stats::kMaxNow, error);
+  if (n < 0) Serial.printf("continue reading: request failed: %s\n", error.c_str());
+  else Serial.printf("continue reading: %d in progress%s%s\n", n, n ? ", first: " : "", n ? now[0].title : "");
+  if (n > 0) {  // add the books being read to the cached document
     JsonDocument doc;
     deserializeJson(doc, json);
-    doc["reading-now"]["id"] = now.id;
-    doc["reading-now"]["fileId"] = now.fileId;
-    doc["reading-now"]["title"] = now.title;
-    doc["reading-now"]["author"] = now.author;
-    doc["reading-now"]["progress"] = nowProgress;
+    JsonArray books = doc["reading-now"].to<JsonArray>();
+    for (int i = 0; i < n; i++) {
+      JsonObject b = books.add<JsonObject>();
+      b["id"] = now[i].id;
+      b["fileId"] = now[i].fileId;
+      b["title"] = now[i].title;
+      b["author"] = now[i].author;
+      b["progress"] = progress[i];
+    }
     json = "";
     serializeJson(doc, json);
   }

@@ -14,8 +14,9 @@ void bar(int x, int y, int w, int h, float fraction, bool inverse = false);  // 
 void dot(int cx, int cy, int r, bool filled);
 // Two circular arrows (sync), scaled by f (1 = about 28 px across), centred on (cx, cy); `slash` crosses them out.
 void drawSyncIcon(int cx, int cy, float f, bool slash);
-// Icons along the bottom edge, above the four buttons: Back, OK, Left/Right (paging), and optionally sync and a gear.
-void drawHints(bool back = true, bool ok = true, bool paging = true, bool settings = false, bool sync = false);
+// Icons along the bottom edge, above the four buttons: Back, OK and Left/Right (paging). `menu` shows a menu icon over the
+// first button instead of Back.
+void drawHints(bool back = true, bool ok = true, bool paging = true, bool menu = false);
 void drawDownloadedIcon(int x, int y, bool ink);  // "saved on the device": an arrow dropping into a tray
 void label(int x, int y, const char* s, bool highlighted);  // text in a normal row, or white on a highlighted one
 // Draws `text` word-wrapped into `w` pixels from (x, y); returns the y below the last line.

@@ -25,7 +25,8 @@ Options:
 | Option | Meaning |
 | --- | --- |
 | `--x3` | Xteink X3 panel (default: X4) |
-| `--sd DIR` | folder used as the SD card (default: `sim/sdcard`) |
+| `--no-demo` | don't start the demo server; the SD card is then `sim/sdcard` (e.g. set up for your own server) |
+| `--sd DIR` | folder used as the SD card (default: `sim/sdcard-demo`, or `sim/sdcard` with `--no-demo`) |
 | `--slow` | wait as long as the real panel takes to refresh |
 | `--scale N` | enlarge the window N times |
 
@@ -42,9 +43,19 @@ Simulator controls: **R** resets the device, **S** saves a screenshot to `sim/sc
 the offline paths), **F** turns the panel refresh times on and off, **+** and **-** change the battery level. The window
 title shows the device, battery, Wi-Fi and sleep state.
 
+## Demo server
+
+By default the simulator also starts `sim/demo_server.py`, a small stand-in for the BookOrbit server
+(`http://127.0.0.1:3000`, login demo/demo, Python 3 standard library only). Its SD card, `sim/sdcard-demo`, is set up to
+use it on the first run, so the simulator opens straight on Home. The server has 8 books, 3 of them in progress (so
+Reading now has several to flip through), the dashboard statistics, covers, downloadable EPUBs and the progress and
+session endpoints. Its state is kept in memory and starts afresh each run. Delete `sim/sdcard-demo` to start the device
+afresh too. The server can also run on its own: `python3 sim/demo_server.py [--port N]`.
+
 ## How it works
 
-- **SD card:** a folder. Put `bookorbit.json` there (or go through the setup wizard), and EPUBs in `BookOrbit/`.
+- **SD card:** a folder. Put `bookorbit.json` there (or go through the setup wizard, e.g. with `--sd` and an empty folder),
+  and EPUBs in `BookOrbit/`.
 - **Network:** Wi-Fi always "connects". A scan lists the configured network and a few made-up ones. HTTP requests go
   through libcurl, so the simulator talks to your real BookOrbit server.
 - **Restart and sleep:** the firmware runs in a child process. `ESP.restart()` (opening and closing a book) and waking

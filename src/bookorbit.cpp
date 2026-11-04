@@ -366,24 +366,23 @@ int BookOrbit::listEntitiesOnce(Scope kind, int page, int pageSize, Entity* out,
   return n;
 }
 
-bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& found, String& error) {
+int BookOrbit::fetchContinueReadingOnce(Book* books, float* progress, int max, String& error) {
   NetGuard netGuard;
   Conn client;
   HTTPClient http;
-  found = false;
-  if (!begin(http, client, server_ + "/api/v1/dashboard/scrollers/batch", token_, error)) return false;
+  if (!begin(http, client, server_ + "/api/v1/dashboard/scrollers/batch", token_, error)) return -1;
   http.addHeader("Content-Type", "application/json");
   JsonDocument body;
   body["items"][0]["id"] = "continue";
   body["items"][0]["type"] = "continue-reading";
-  body["items"][0]["limit"] = 1;
+  body["items"][0]["limit"] = max;
   String payload;
   serializeJson(body, payload);
   const int code = http.POST(payload);
   if (!isOk(code)) {
     error = errorFor(code);
     http.end();
-    return false;
+    return -1;
   }
   JsonDocument filter;
   filter["items"][0]["books"][0]["id"] = true;
@@ -398,21 +397,24 @@ bool BookOrbit::fetchContinueReadingOnce(Book& book, float& progress, bool& foun
   http.end();
   if (err) {
     error = String("Bad response: ") + err.c_str();
-    return false;
+    return -1;
   }
-  JsonObject b = doc["items"][0]["books"][0];
-  if (b.isNull()) return true;  // nothing in progress
-  book = Book();
-  book.id = b["id"] | 0L;
-  strlcpy(book.title, b["title"] | "(untitled)", sizeof(book.title));
-  strlcpy(book.author, b["authors"][0] | "", sizeof(book.author));
-  for (JsonObject f : b["files"].as<JsonArray>()) {
-    const char* fmt = f["format"] | "";
-    if (strcasecmp(fmt, "epub") == 0 || strcasecmp(fmt, "kepub") == 0) { book.fileId = f["id"] | 0L; break; }
+  int n = 0;
+  for (JsonObject b : doc["items"][0]["books"].as<JsonArray>()) {
+    if (n == max) break;
+    Book& book = books[n];
+    book = Book();
+    book.id = b["id"] | 0L;
+    if (!book.id) continue;
+    strlcpy(book.title, b["title"] | "(untitled)", sizeof(book.title));
+    strlcpy(book.author, b["authors"][0] | "", sizeof(book.author));
+    for (JsonObject f : b["files"].as<JsonArray>()) {
+      const char* fmt = f["format"] | "";
+      if (strcasecmp(fmt, "epub") == 0 || strcasecmp(fmt, "kepub") == 0) { book.fileId = f["id"] | 0L; break; }
+    }
+    progress[n++] = b["readingProgress"] | 0.0f;
   }
-  progress = b["readingProgress"] | 0.0f;
-  found = book.id != 0;
-  return true;
+  return n;
 }
 
 bool BookOrbit::fetchThumbnailOnce(long bookId, const String& path, String& error) {
@@ -633,10 +635,10 @@ int BookOrbit::listEntities(Scope kind, int page, int pageSize, Entity* out, int
   return n;
 }
 
-bool BookOrbit::fetchContinueReading(Book& book, float& progress, bool& found, String& error) {
-  bool ok = fetchContinueReadingOnce(book, progress, found, error);
-  if (!ok && unauthorized(error) && refresh()) ok = fetchContinueReadingOnce(book, progress, found, error);
-  return ok;
+int BookOrbit::fetchContinueReading(Book* books, float* progress, int max, String& error) {
+  int n = fetchContinueReadingOnce(books, progress, max, error);
+  if (n < 0 && unauthorized(error) && refresh()) n = fetchContinueReadingOnce(books, progress, max, error);
+  return n;
 }
 
 bool BookOrbit::fetchThumbnail(long bookId, const String& path, String& error) {

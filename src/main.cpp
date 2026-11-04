@@ -168,6 +168,9 @@ int setupStep = 0;  // 0 = Wi-Fi, 1 = server and account
 int setupSel = 0;   // step 2: 0 server, 1 username, 2 password, 3 sign in
 int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer, update
 int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
+int nowSel = 0;   // which of the books in progress the Reading now card shows (Left/Right); the most recent after each boot
+bool homeMenu = false;  // the Back menu over Home: Sync now, Settings
+int homeMenuSel = 0;
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
 
 // Sends a drawn screen to the panel: a quick refresh for changes within a screen; a new screen (full) gets the half refresh
@@ -373,7 +376,7 @@ static pets::Pose petPose(int hour, bool finishedToday) {
   const int streak = stats.streakDays, longest = stats.longest;
   const int todayMin = stats.nDays ? stats.minutes[stats.nDays - 1] : 0;
   const bool milestone = streak == 7 || streak == 30 || streak == 50 || streak == 100 || streak == 200 || streak == 365;
-  if (!stats.readingNow && streak == 0) return pets::Wait;
+  if (!stats.readingNow() && streak == 0) return pets::Wait;
   if (todayMin <= 0) return pets::Sleep;
   if (finishedToday) return pets::Ribbon;
   if (milestone || (streak > 1 && streak >= longest)) return pets::Party;
@@ -441,32 +444,44 @@ static void drawPet(int x, int y, int w, int h, bool sel) {
   }
 }
 
-void testFakeNow() {  // test hook: pretend a book is in progress
-  stats.readingNow = true;
-  stats.nowId = 359;  // a book of the real test library
-  strlcpy(stats.nowTitle, "Wybaczam ci", sizeof(stats.nowTitle));
-  strlcpy(stats.nowAuthor, "Remigiusz Mroz", sizeof(stats.nowAuthor));
-  stats.nowProgress = 42;  // press a key afterwards to redraw
+void testFakeNow() {  // test hook: pretend three books are in progress (press a key afterwards to redraw)
+  const char* titles[] = {"Wybaczam ci", "Nie ufaj mu", "Kasacja"};
+  stats.nowCount = 3;
+  for (int i = 0; i < 3; i++) {
+    NowBook& b = stats.now[i];
+    b = NowBook();
+    b.id = i == 0 ? 359 : 0;  // a book of the real test library (its cover), then two without one
+    strlcpy(b.title, titles[i], sizeof(b.title));
+    strlcpy(b.author, "Remigiusz Mroz", sizeof(b.author));
+    b.progress = 42 - 15 * i;
+  }
+  nowSel = 0;
 }
 
 // ---- Home: Reading now, Library and the statistics cards (the same dashboard widgets as the Android app) ------
 
-// The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected.
+// The book being read: cover, title, author, progress. Highlighted (dark with light text) when selected. With several books
+// in progress it shows the one picked with Left/Right, and "2 / 3" in its corner.
 static void drawReadingNow(int y, bool sel) {
   const int kFull = gfx::W - 2 * kMargin;
+  const NowBook& now = stats.now[nowSel];
   char buf[16];
   frame(kMargin, y, kFull, 96, 8, sel);
   label(kMargin + 68, y + 1, "Reading now", sel);
+  if (stats.nowCount > 1) {
+    snprintf(buf, sizeof(buf), "%d / %d", nowSel + 1, stats.nowCount);
+    label(kMargin + kFull - 12 - gfx::textWidth(buf), y + 1, buf, sel);
+  }
   roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, false);  // white plate so the cover shows on dark too
   roundRect(kMargin + 8, y + 11, cover::W + 4, cover::H + 4, 3, true);
   gfx::fillRect(kMargin + 10, y + 13, cover::W, cover::H, false);
   uint8_t bits[cover::kBytes];
-  if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
+  if (now.id && cover::load(now.id, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
   // The title in a larger face, on one line or wrapped onto two (the second one shortened with "...").
   const int kTitleW = kFull - 80;
   int kTitleSize = 26;  // one line at 26; a long title is wrapped onto two lines at 24
   char first[96], second[96] = "";
-  strlcpy(first, stats.nowTitle, sizeof(first));
+  strlcpy(first, now.title, sizeof(first));
   if (gfx::bigTextWidth(first, kTitleSize) > kTitleW) {
     kTitleSize = 24;
     int cut = -1;  // the last space after which the first line still fits
@@ -480,7 +495,7 @@ static void drawReadingNow(int y, bool sel) {
       cut = i;
     }
     if (cut > 0) {
-      strlcpy(second, stats.nowTitle + cut + 1, sizeof(second));
+      strlcpy(second, now.title + cut + 1, sizeof(second));
       first[cut] = 0;
     }
   }
@@ -490,14 +505,14 @@ static void drawReadingNow(int y, bool sel) {
   fitBig(second, kTitleW, kTitleSize);
   gfx::bigText(kMargin + 68, ty, first, kTitleSize, !sel);
   if (lines == 2) gfx::bigText(kMargin + 68, ty + 26, second, kTitleSize, !sel);
-  bar(kMargin + 68, y + 79, kFull - 68 - 70, 12, stats.nowProgress / 100.0f, sel);
-  snprintf(buf, sizeof(buf), "%d%%", (int)stats.nowProgress);
+  bar(kMargin + 68, y + 79, kFull - 68 - 70, 12, now.progress / 100.0f, sel);
+  snprintf(buf, sizeof(buf), "%d%%", (int)now.progress);
   label(kMargin + kFull - 62, y + 64, buf, sel);
 }
 
 // Home items from the top: Reading now (when there is a book in progress), then Library. homeSel counts them.
-static bool readingSelected() { return stats.readingNow && homeSel == 0; }
-static bool librarySelected() { return homeSel == (stats.readingNow ? 1 : 0); }
+static bool readingSelected() { return stats.readingNow() && homeSel == 0; }
+static bool librarySelected() { return homeSel == (stats.readingNow() ? 1 : 0); }
 
 // The stats panel under the Home menu: y from 146 down to 700.
 static void drawStats(int y) {
@@ -568,13 +583,16 @@ static void drawStats(int y) {
   }
 }
 
-// Home: a menu with a single item for now.
+static void drawHomeMenuBox();
+
+// Home: Reading now, Library and the statistics.
 static void drawHome(bool full) {
   gfx::clear();
   header("BookOrbit");
-  if (!stats.readingNow && homeSel > 0) homeSel = 0;
+  if (!stats.readingNow() && homeSel > 0) homeSel = 0;
+  if (nowSel >= stats.nowCount) nowSel = 0;
   int y = kListTop;
-  if (stats.readingNow) {
+  if (stats.readingNow()) {
     drawReadingNow(y, readingSelected());
     y += 102;
   }
@@ -599,7 +617,8 @@ static void drawHome(bool full) {
     label(kMargin + 74, y + 20, "Library", sel);
   }
   drawStats(y + kRowHeight - 4 + 6);
-  drawHints(true, true, false, true, true);
+  drawHints(false, true, stats.nowCount > 1, true);  // Back opens the menu; Left/Right flip through the books in progress
+  if (homeMenu) drawHomeMenuBox();  // redrawn (new statistics) while the menu is open
   present(full);
 }
 
@@ -1479,13 +1498,14 @@ static void openSelected() {
 }
 
 // The book shown in the Home "Reading now" card.
-static void openReadingNow() {
-  Book b;
-  b.id = stats.nowId;
-  b.fileId = stats.nowFileId;
-  strlcpy(b.title, stats.nowTitle, sizeof(b.title));
-  strlcpy(b.author, stats.nowAuthor, sizeof(b.author));
-  openBook(b);
+static void openReadingNow() { openBook(stats.now[nowSel]); }
+
+// Left/Right on Home: the previous or next book in progress on the card (wrapping around).
+static void flipReadingNow(int dir) {
+  const int n = stats.nowCount;
+  if (n < 2) return;
+  nowSel = (nowSel + dir + n) % n;
+  showList(false);
 }
 
 // Set by goToSleep() when it leaves a book: where the reader stood, so the sleep screen shows it even before the server knows.
@@ -1496,7 +1516,8 @@ static void drawSleepScreen(int sync) {
   gfx::clear();  // light page
   if (!stats.any()) loadStats();  // reading mode starts without the statistics
   loadPet();
-  const bool book = stats.readingNow && stats.nowId;
+  const NowBook& now = stats.now[0];  // the book read last
+  const bool book = stats.readingNow() && now.id;
   if (book) gfx::loadUiFont();
   const int coverW = cover::BigW, coverH = cover::BigH;  // the large cover is drawn 1:1
   constexpr int kTitleSize = 26, kTitleStep = 30, kAuthorSize = 22, kAuthorStep = 28, kBarRow = 26;
@@ -1504,8 +1525,8 @@ static void drawSleepScreen(int sync) {
   const int kScale = book ? 2 : 3, kSize = 64 * kScale;
   const int textX = 20 + kSize + 16, textW = gfx::W - 20 - textX;  // the column to the right of the companion
   char t1[100] = "", t2[100] = "";
-  const int titleLines = book ? wrapBig(stats.nowTitle, textW, kTitleSize, t1, t2) : 0;
-  const bool author = book && stats.nowAuthor[0];
+  const int titleLines = book ? wrapBig(now.title, textW, kTitleSize, t1, t2) : 0;
+  const bool author = book && now.author[0];
   const int textH = titleLines * kTitleStep + (author ? kAuthorStep : 0) + 10 + kBarRow;
   const int rowH = kSize;  // the companion is taller than the text, so the row is its height
   const int y0 = book ? (gfx::H - (coverH + 22 + rowH)) / 2 : 0;
@@ -1517,21 +1538,21 @@ static void drawSleepScreen(int sync) {
     for (int x = 0; x < 64; x++)
       if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, petY + y * kScale, kScale, kScale, true);
   if (book) {
-    float pct = stats.nowProgress;
-    if (sleepLivePct >= 0 && sleepLiveFile && sleepLiveFile == stats.nowFileId) pct = max(pct, sleepLivePct);  // the book just read
+    float pct = now.progress;
+    if (sleepLivePct >= 0 && sleepLiveFile && sleepLiveFile == now.fileId) pct = max(pct, sleepLivePct);  // the book just read
     const int cy = y0;
     gfx::fillRect(cx - 4, cy - 4, coverW + 8, coverH + 8, true);  // a frame around the cover
     gfx::fillRect(cx - 2, cy - 2, coverW + 4, coverH + 4, false);
-    if (cover::hasBig(stats.nowId)) {  // drawn in strips, so no big buffer is needed
+    if (cover::hasBig(now.id)) {  // drawn in strips, so no big buffer is needed
       constexpr int kStrip = 24;
       uint8_t strip[kStrip * (cover::BigW / 8)];
       for (int row = 0; row < coverH; row += kStrip) {
         const int n = min(kStrip, coverH - row);
-        if (cover::loadBigRows(stats.nowId, row, n, strip)) gfx::blit1bit(cx, cy + row, strip, coverW, n);
+        if (cover::loadBigRows(now.id, row, n, strip)) gfx::blit1bit(cx, cy + row, strip, coverW, n);
       }
     } else {  // no large cover yet: the small one, enlarged
       uint8_t small[cover::kBytes];
-      if (cover::load(stats.nowId, small)) {
+      if (cover::load(now.id, small)) {
         const int k = coverW / cover::W;  // 7x
         for (int y = 0; y < cover::H; y++)
           for (int x = 0; x < cover::W; x++)
@@ -1544,7 +1565,7 @@ static void drawSleepScreen(int sync) {
     ty += titleLines * kTitleStep;
     if (author) {
       char a1[100];
-      strlcpy(a1, stats.nowAuthor, sizeof(a1));
+      strlcpy(a1, now.author, sizeof(a1));
       fitBig(a1, textW, kAuthorSize);
       gfx::bigText(textX, ty, a1, kAuthorSize);
       ty += kAuthorStep;
@@ -1561,7 +1582,7 @@ static void drawSleepScreen(int sync) {
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
-static bool ensureReadingCover();
+static bool ensureReadingCover(long id);
 
 // Loads the settings and prepares the server client. Library mode does this at start-up; going to sleep from the reader does it
 // on demand (reading mode starts without any of it).
@@ -1598,7 +1619,7 @@ static void syncBeforeSleep() {
   outbox::flushProgress(api);
   outbox::flushSessions(api);
   refreshStats(api);
-  if (stats.readingNow && stats.nowId && !cover::cached(stats.nowId)) ensureReadingCover();  // the sleep screen shows it: have it ready
+  if (stats.readingNow()) ensureReadingCover(stats.now[0].id);  // the sleep screen shows it: have it ready
 }
 
 // Draws the sleep screen and deep-sleeps; the Power button wakes the device (a fresh boot).
@@ -1673,52 +1694,57 @@ constexpr const char* kMarginNames[] = {"Narrow", "Normal", "Wide", "Wider"};
 constexpr int kSizeCount = sizeof(reader::kFontSizes) / sizeof(reader::kFontSizes[0]);
 constexpr int kMarginCount = sizeof(reader::kMargins) / sizeof(reader::kMargins[0]);
 
-static int menuBoxH = 0;  // height of the box (or full-screen list) now over the page, 0 = none
+constexpr int kMenuRowH = 34;
+static int menuHeight(int rows) { return 50 + rows * kMenuRowH; }
 
 static void drawMenuBox(const char* title, int h, int& x, int& y, int& w) {
   w = 230;
   x = (gfx::W - w) / 2;
   y = 250;
   gfx::waitIdle();
-  if (h < menuBoxH) {  // a smaller box would leave the bigger one's edges behind: put the page back first
-    reader::uiFont(false);
-    reader::render();
-    reader::uiFont(true);
-  }
-  menuBoxH = h;
   gfx::fadeBackground();
   frame(x, y, w, h, 12);
   gfx::bigText(x + 18, y + 8, title, 18);
   gfx::fillRect(x + 10, y + 34, w - 20, 2, true);
 }
 
-// A menu box over the page with `n` rows; row(i, buf) writes the text of row i into a 24-byte buffer.
+// A menu box over the page with `n` rows, row `selected` highlighted; row(i, buf) writes the text of row i into a 24-byte
+// buffer.
 template <typename Row>
-static void drawMenuRows(const char* title, int n, Row row) {
-  constexpr int rowH = 34;
+static void drawMenuRows(const char* title, int n, int selected, Row row) {
   int x, y, w;
-  drawMenuBox(title, 50 + n * rowH, x, y, w);
+  drawMenuBox(title, menuHeight(n), x, y, w);
   for (int i = 0; i < n; i++) {
-    const int ry = y + 40 + i * rowH;
-    const bool sel = i == readerMenuSel;
-    if (sel) roundRect(x + 8, ry, w - 16, rowH - 4, 6, true);
+    const int ry = y + 40 + i * kMenuRowH;
+    const bool sel = i == selected;
+    if (sel) roundRect(x + 8, ry, w - 16, kMenuRowH - 4, 6, true);
     char text[24];
     row(i, text);
     gfx::bigText(x + 22, ry + 4, text, 18, !sel);
   }
 }
 
+static int menuBoxH = 0;  // height of the reader's box (or full-screen list) now over the page, 0 = none
+
 static void drawReaderMenu() {
+  const int rows = readerMenu == RMenu::Main ? mainCount : readerMenu == RMenu::Size ? kSizeCount : readerMenu == RMenu::Margin ? kMarginCount : 0;
+  if (rows && menuHeight(rows) < menuBoxH) {  // a smaller box would leave the bigger one's edges behind: put the page back first
+    gfx::waitIdle();
+    reader::uiFont(false);
+    reader::render();
+    reader::uiFont(true);
+  }
+  if (rows) menuBoxH = menuHeight(rows);
   if (readerMenu == RMenu::Main) {
-    drawMenuRows("Menu", mainCount, [](int i, char* text) {
+    drawMenuRows("Menu", mainCount, readerMenuSel, [](int i, char* text) {
       strlcpy(text, mainItems[i] == 0 ? "Contents" : mainItems[i] == 1 ? "Text size" : "Margins", 24);
     });
   } else if (readerMenu == RMenu::Size) {
-    drawMenuRows("Text size", kSizeCount, [](int i, char* text) {
+    drawMenuRows("Text size", kSizeCount, readerMenuSel, [](int i, char* text) {
       snprintf(text, 24, "%d px%s", reader::kFontSizes[i], reader::kFontSizes[i] == reader::fontSize() ? "  *" : "");
     });
   } else if (readerMenu == RMenu::Margin) {
-    drawMenuRows("Margins", kMarginCount, [](int i, char* text) {
+    drawMenuRows("Margins", kMarginCount, readerMenuSel, [](int i, char* text) {
       snprintf(text, 24, "%s%s", kMarginNames[i], reader::kMargins[i] == reader::margin() ? "  *" : "");
     });
   } else if (readerMenu == RMenu::Toc) {
@@ -1742,6 +1768,16 @@ static void drawReaderMenu() {
       if (i == cur) gfx::text(gfx::W - kMargin - 12, ry + 8, "*", !sel);
     }
   }
+  gfx::flush(EInkDisplay::FAST_REFRESH);
+}
+
+// The Home menu (Back on Home): Sync now and Settings, in a box over Home. drawHome() includes it while it is open.
+constexpr const char* kHomeMenu[] = {"Sync now", "Settings"};
+static void drawHomeMenuBox() {
+  drawMenuRows("Menu", 2, homeMenuSel, [](int i, char* text) { strlcpy(text, kHomeMenu[i], 24); });
+}
+static void drawHomeMenu() {
+  drawHomeMenuBox();
   gfx::flush(EInkDisplay::FAST_REFRESH);
 }
 
@@ -1986,7 +2022,7 @@ static void backgroundSync() {
     net = Net::Online;
     pollSleep();
     if (!sleepPending) { refreshStats(api); pollSleep(); }
-    if (!sleepPending) { ensureReadingCover(); pollSleep(); }
+    if (!sleepPending && stats.readingNow()) { ensureReadingCover(stats.now[0].id); pollSleep(); }
     if (!sleepPending && loadPage(keepPage, error)) selected = min(keep, max(0, bookCount - 1));
     Serial.printf("library: %d books (page %d) refreshed\n", bookTotal, bookCount);
   } else {
@@ -2013,16 +2049,15 @@ static void manualSync() {
   outbox::flushProgress(api);
   outbox::flushSessions(api);
   refreshStats(api);
-  ensureReadingCover();
+  if (stats.readingNow()) ensureReadingCover(stats.now[0].id);
   syncModal("Synced", "Progress and statistics are up to date");
   delay(900);
   showList(false);
 }
 
-// Fetches and converts the Reading now cover when it is not cached yet (needs the server). False when that failed.
-static bool ensureReadingCover() {
-  const long id = stats.nowId;
-  if (!stats.readingNow || !id || cover::cached(id)) return true;
+// Fetches and converts a Reading now cover when it is not cached yet (needs the server). False when that failed.
+static bool ensureReadingCover(long id) {
+  if (!id || cover::cached(id)) return true;
   String error;
   if (!api.fetchThumbnail(id, cover::stagingPath(), error)) {
     Serial.printf("cover %ld failed: %s\n", id, error.c_str());
@@ -2036,12 +2071,18 @@ static bool ensureReadingCover() {
   return ok;
 }
 
-// The Reading now cover is also fetched while Home is idle and online (a retry after a failure comes a minute later).
+// The Reading now covers are also fetched while Home is idle and online, one at a time (a retry after a failure comes a
+// minute later).
 static void fetchReadingCover() {
   static uint32_t retryAfter = 0;
-  const long id = stats.nowId;
-  if (!stats.readingNow || !id || net != Net::Online || millis() < retryAfter || cover::cached(id)) return;
-  if (ensureReadingCover()) showList(false); else retryAfter = millis() + 60000;
+  if (net != Net::Online || millis() < retryAfter) return;
+  for (int i = 0; i < stats.nowCount; i++) {
+    const long id = stats.now[i].id;
+    if (!id || cover::cached(id)) continue;
+    if (!ensureReadingCover(id)) retryAfter = millis() + 60000;
+    else if (i == nowSel) showList(false);
+    return;
+  }
 }
 
 // After loading a list page: shows it, or the error (until a button is pressed).
@@ -2294,16 +2335,40 @@ void loop() {
   pumpDisplay();
   if (!setupMode) backgroundSync();
   netIdle();
-  if (screen == Screen::Home) {
-    if (pressed(InputManager::BTN_RIGHT)) {
-      screen = Screen::Settings;
-      settingsSel = 0;
+  if (screen == Screen::Home && homeMenu) {
+    if (backClicked()) {
+      homeMenu = false;
       showList(false);
+    } else if (pressed(InputManager::BTN_DOWN) || pressed(InputManager::BTN_UP)) {
+      homeMenuSel = 1 - homeMenuSel;
+      drawHomeMenu();
+    } else if (pressed(InputManager::BTN_CONFIRM)) {
+      homeMenu = false;
+      if (homeMenuSel == 0) {
+        manualSync();
+      } else {
+        screen = Screen::Settings;
+        settingsSel = 0;
+        showList(false);
+      }
+    }
+    delay(10);
+    return;
+  }
+  if (screen == Screen::Home) {
+    if (backClicked()) {
+      homeMenu = true;
+      homeMenuSel = 0;
+      drawHomeMenu();
+    } else if (pressed(InputManager::BTN_RIGHT)) {
+      flipReadingNow(1);
+    } else if (pressed(InputManager::BTN_LEFT)) {
+      flipReadingNow(-1);
     } else if (pressed(InputManager::BTN_DOWN)) {  // the lists wrap around: past the last item is the first
-      const int n = stats.readingNow ? 2 : 1;
+      const int n = stats.readingNow() ? 2 : 1;
       if (n > 1) { homeSel = (homeSel + 1) % n; showList(false); }
     } else if (pressed(InputManager::BTN_UP)) {
-      const int n = stats.readingNow ? 2 : 1;
+      const int n = stats.readingNow() ? 2 : 1;
       if (n > 1) { homeSel = (homeSel + n - 1) % n; showList(false); }
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (readingSelected()) {
@@ -2312,8 +2377,6 @@ void loop() {
         screen = Screen::Browse;
         showList(false);
       }
-    } else if (pressed(InputManager::BTN_LEFT)) {
-      manualSync();
     } else {
       fetchReadingCover();  // idle: fetch the Reading now cover once
     }

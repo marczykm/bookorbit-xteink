@@ -2,7 +2,10 @@
 // process (started again on ESP.restart() and on waking from deep sleep, so each run starts from a clean state like the
 // device; RTC_NOINIT_ATTR variables are carried over).
 //
-//   .pio/build/simulator/program [--x3] [--sd DIR] [--slow] [--scale N]
+//   .pio/build/simulator/program [--x3] [--sd DIR] [--slow] [--scale N] [--no-demo]
+//
+// Unless --no-demo is given it also runs sim/demo_server.py (a stand-in BookOrbit server on port 3000, login demo/demo),
+// with its own SD card folder (sim/sdcard-demo) set up to use it. --no-demo uses sim/sdcard, e.g. for your own server.
 //
 // Keys: Esc/Backspace = Back, Enter = OK, arrows = Left/Right/Up/Down, P = Power (hold for a long press),
 //       R = reset, S = screenshot, W = Wi-Fi out of reach, F = panel refresh times on/off, +/- = battery.
@@ -36,7 +39,7 @@ constexpr uint32_t kPaper = 0xFFF4F1EA, kInk = 0xFF1E1E1E;
 
 sim::Shared* shm = nullptr;
 int shmFd = -1, ptyFd = -1;
-pid_t child = -1;
+pid_t child = -1, demo = -1;
 std::string self;
 bool sleeping = false, crashed = false;
 
@@ -76,6 +79,35 @@ void stopChild() {
     kill(child, SIGKILL);
     waitpid(child, nullptr, 0);
     child = -1;
+  }
+}
+
+// The demo server, and (on the demo SD card, when it has none yet) the settings that point the device at it.
+void startDemo(bool seed) {
+  const std::string script = SIM_DIR "/demo_server.py";
+  const char* args[] = {"python3", script.c_str(), "--port", "3000", nullptr};
+  if (posix_spawnp(&demo, "python3", nullptr, nullptr, (char**)args, environ) != 0) {
+    demo = -1;
+    fprintf(stderr, "[sim] could not start the demo server (python3 not found)\n");
+    return;
+  }
+  const std::string cfg = std::string(SIM_DIR) + "/sdcard-demo/bookorbit.json";
+  struct stat st;
+  if (!seed || stat(cfg.c_str(), &st) == 0) return;
+  mkdir(SIM_DIR "/sdcard-demo", 0755);
+  if (FILE* f = fopen(cfg.c_str(), "w")) {
+    fputs("{\"ssid\":\"Simulator Wi-Fi\",\"wifiPassword\":\"demo\",\"server\":\"http://127.0.0.1:3000\","
+          "\"username\":\"demo\",\"password\":\"demo\"}\n", f);
+    fclose(f);
+    printf("[sim] wrote %s (demo server, demo/demo)\n", cfg.c_str());
+  }
+}
+
+void stopDemo() {
+  if (demo > 0) {
+    kill(demo, SIGTERM);
+    waitpid(demo, nullptr, 0);
+    demo = -1;
   }
 }
 
@@ -143,15 +175,16 @@ int main(int argc, char** argv) {
   if (argc == 4 && !strcmp(argv[1], "--firmware")) return sim::runFirmware(atoi(argv[2]), atoi(argv[3]));
 
   self = argv[0];
-  bool x3 = false, slow = false;
+  bool x3 = false, slow = false, withDemo = true;
   int scale = 1;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--x3")) x3 = true;
     else if (!strcmp(argv[i], "--slow")) slow = true;
+    else if (!strcmp(argv[i], "--no-demo")) withDemo = false;
     else if (!strcmp(argv[i], "--sd") && i + 1 < argc) setenv("SIM_SD", argv[++i], 1);
     else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = std::max(1, atoi(argv[++i]));
     else {
-      fprintf(stderr, "usage: %s [--x3] [--sd DIR] [--slow] [--scale N]\n", argv[0]);
+      fprintf(stderr, "usage: %s [--x3] [--sd DIR] [--slow] [--scale N] [--no-demo]\n", argv[0]);
       return 2;
     }
   }
@@ -169,6 +202,11 @@ int main(int argc, char** argv) {
   shm->fbStride = (shm->fbWidth + 7) / 8;
   memset(shm->fb, 0xFF, sizeof(shm->fb));
 
+  if (withDemo) {
+    const bool seed = !getenv("SIM_SD");
+    if (seed) setenv("SIM_SD", SIM_DIR "/sdcard-demo", 1);
+    startDemo(seed);
+  }
   const std::string pty = openPty();
   printf("[sim] %s, SD card: %s\n", x3 ? "Xteink X3" : "Xteink X4", getenv("SIM_SD") ? getenv("SIM_SD") : SIM_DIR "/sdcard");
   if (!pty.empty()) printf("[sim] serial port: %s  (e.g. python tools/drive.py %s OUTDIR ...)\n", pty.c_str(), pty.c_str());
@@ -192,6 +230,7 @@ int main(int argc, char** argv) {
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
         stopChild();
+        stopDemo();
         return 0;
       }
       if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && !e.key.repeat) {
