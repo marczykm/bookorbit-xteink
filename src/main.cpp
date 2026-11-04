@@ -353,8 +353,10 @@ static void handleSerial() {
 // ---- Screens -------------------------------------------------------------------------------------------------
 
 // Set while the device is talking to the BookOrbit server (no longer drawn; the "Syncing" modal covers long waits).
-static bool quietSync = false;  // back from a book (a software restart): sync without the modal
 static bool busy = false;
+// Back from a book (leaving one restarts the device): the start-up sync also sends the reading progress just made. After
+// waking from sleep it doesn't (progress goes before sleep and when a book is opened).
+static bool fromBook = false;
 
 static void setBusy(bool on) { busy = on; }
 
@@ -2362,7 +2364,7 @@ void setup() {
     strlcpy(srcName, openScopeName, sizeof(srcName));
   }
   openLibraryMagic = 0;
-  quietSync = esp_reset_reason() == ESP_RST_SW;
+  fromBook = esp_reset_reason() == ESP_RST_SW;
   String error;
   if (!initApi(error)) {
     Serial.printf("setup needed: %s\n", error.c_str());
@@ -2435,10 +2437,11 @@ static void backgroundSync() {
   configTime(0, 0, "pool.ntp.org", "time.google.com");  // wall-clock time for reading sessions
   const int keep = selected, keepPage = page;
   setBusy(true);
-  if (!quietSync) syncModal("Syncing", "Statistics...");  // the buttons are not read until it is done
+  syncModal("Syncing", fromBook ? "Progress and statistics..." : "Statistics...");  // the buttons are not read until it is done
   if (api.login(config.username, config.password, error)) {
     pollSleep();
-    flushSessions();  // reading progress is sent when a book is opened or before sleep, not at wake-up
+    if (fromBook) flushProgress();  // after waking, progress waits for a book to be opened or for sleep
+    flushSessions();
     syncFailed = false;
     net = Net::Online;
     pollSleep();
