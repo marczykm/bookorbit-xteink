@@ -2314,6 +2314,7 @@ void setup() {
   // X3 or X4 (one binary for both): the X3's extra I2C chips tell them apart. Before anything reads the board profile.
   const bool x3 = freeink::selectXteinkDevice();
   if (x3) display.setDisplayX3();
+  updater::setDevice(x3 ? "x3" : "x4");
   Serial.printf("device: %s\n", x3 ? "X3" : "X4");
   BoardConfig::releaseSdRail();
   input.begin();

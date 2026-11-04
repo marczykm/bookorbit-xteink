@@ -10,6 +10,8 @@ struct Info {
 };
 
 const char* currentVersion();
+// The device the update image is picked for: "x4" (default) or "x3". The images are named bookorbit-<device>-<version>-ota.bin.
+void setDevice(const char* name);
 // Asks GitHub for the latest release: 1 = a newer one is in `info`, 0 = this firmware is current, -1 = error.
 int check(Info& info, String& error);
 // Downloads the image into the spare app slot and makes it the next boot; `progress` gets 0-100. The caller restarts.

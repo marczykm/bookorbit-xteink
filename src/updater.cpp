@@ -12,9 +12,6 @@
 #ifndef UPDATE_API
 #define UPDATE_API "https://api.github.com/repos/marczykm/bookorbit-xteink/releases/latest"
 #endif
-#ifndef UPDATE_ASSET
-#define UPDATE_ASSET "bookorbit-x4-"  // the asset name starts with this and ends with "-ota.bin"
-#endif
 
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
 extern const uint8_t rootca_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
@@ -65,6 +62,11 @@ long versionNumber(const char* v) {
 
 const char* currentVersion() { return FW_VERSION; }
 
+namespace {
+String assetPrefix = "bookorbit-x4-";  // the asset name starts with this and ends with "-ota.bin"
+}
+void setDevice(const char* name) { assetPrefix = String("bookorbit-") + name + "-"; }
+
 int check(Info& info, String& error) {
   HTTPClient http;
   Conn conn;
@@ -91,7 +93,7 @@ int check(Info& info, String& error) {
   const char* tag = doc["tag_name"] | "";
   for (JsonObject a : doc["assets"].as<JsonArray>()) {
     String name = a["name"] | "";
-    if (!name.startsWith(UPDATE_ASSET) || !name.endsWith("-ota.bin")) continue;
+    if (!name.startsWith(assetPrefix) || !name.endsWith("-ota.bin")) continue;
     const char* v = tag[0] == 'v' ? tag + 1 : tag;
     strlcpy(info.version, v, sizeof(info.version));
     strlcpy(info.url, a["browser_download_url"] | "", sizeof(info.url));
