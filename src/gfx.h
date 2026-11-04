@@ -1,5 +1,5 @@
 #pragma once
-// Portrait (480x800) drawing on the X4's native 800x480 1-bit framebuffer.
+// Portrait drawing on the panel's landscape 1-bit framebuffer: 480x800 on the X4 (800x480 panel), 528x792 on the X3.
 // Text uses FreeInkUI's built-in Noto Sans bitmap (ASCII only, Polish letters folded) until loadUiFont() switches to Noto Serif.
 #include <EInkDisplay.h>
 #include <stdint.h>
@@ -7,8 +7,8 @@
 namespace freeink::font { class TtfFont; }
 
 namespace gfx {
-constexpr int W = 480;
-constexpr int H = 800;
+extern int W;  // portrait width and height, set by begin() from the panel
+extern int H;
 
 void begin(EInkDisplay* display);
 // Switches text to Noto Serif from the flash font pack (Polish letters); keeps the ASCII bitmap font on failure.

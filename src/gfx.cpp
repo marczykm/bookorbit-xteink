@@ -75,6 +75,9 @@ size_t glyphUsed = 0;
 // The cache is made only once the 48 KB refresh shadow exists (an async refresh started), and freed with it in low-memory
 // mode, so it never takes the contiguous block the shadow needs.
 bool glyphCacheAllowed = false;
+bool lowMemory = false;
+// Panels that always refresh blocking (the X3) never make the shadow, so the cache doesn't wait for it there.
+bool shadowless() { return disp->isX3Mode() || !disp->supportsAsyncRefresh(); }
 
 void flushGlyphCache() {
   for (int i = 0; i < kGlyphSlots; i++) glyphSlots[i].key = 0;
@@ -92,7 +95,7 @@ void freeGlyphCache() {
 
 bool makeGlyphCache() {
   if (glyphSlots) return true;
-  if (!glyphCacheAllowed || !ttfOnOwn || ESP.getMaxAllocHeap() < 24 * 1024) return false;
+  if (!(glyphCacheAllowed || (shadowless() && !lowMemory)) || !ttfOnOwn || ESP.getMaxAllocHeap() < 24 * 1024) return false;
   glyphSlots = new (std::nothrow) Glyph1[kGlyphSlots];
   glyphPool = glyphSlots ? static_cast<uint8_t*>(malloc(kGlyphPool)) : nullptr;
   if (!glyphPool) freeGlyphCache();
@@ -149,7 +152,13 @@ void ttfGlyph(int x, int baseline, uint32_t cp, int size, bool black) {
 }
 }  // namespace
 
-void begin(EInkDisplay* display) { disp = display; }
+int W = 480, H = 800;
+
+void begin(EInkDisplay* display) {
+  disp = display;
+  W = display->getDisplayHeight();  // portrait: the panel turned a quarter
+  H = display->getDisplayWidth();
+}
 
 bool loadUiFont() {
   if (ttfOnOwn) return true;  // already loaded
@@ -335,6 +344,7 @@ void flush(EInkDisplay::RefreshMode mode) {
 bool busy() { return disp->refreshBusy(); }
 void waitIdle() { disp->waitRefreshComplete(); }
 void setLowMemory(bool on) {
+  lowMemory = on;
   if (on) {
     freeGlyphCache();
     glyphCacheAllowed = false;

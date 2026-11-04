@@ -3,7 +3,8 @@ import sys
 from PIL import Image
 lines = open(sys.argv[1], errors="replace").read().split("FB-BEGIN")[-1].split("FB-END")[0].split()
 raw = bytes.fromhex("".join(lines))
-pw, ph = 800, 480
+# the panel size follows from the dump: 800x480 (X4) or 792x528 (X3)
+pw, ph = (792, 528) if len(raw) == 792 // 8 * 528 else (800, 480)
 img = Image.new("1", (pw, ph), 1)
 px = img.load()
 for y in range(ph):

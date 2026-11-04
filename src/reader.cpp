@@ -525,7 +525,8 @@ static void drawFooter() {
   gfx::bigText(gfx::W - 20 - etaW, gfx::H - 38, eta, 16);
   gfx::lendFace(nullptr);
 
-  constexpr int x0 = 20, y = gfx::H - 26;
+  constexpr int x0 = 20;
+  const int y = gfx::H - 26;
   const int len = gfx::W - 40 - etaW - 14;  // the axis stops short of the time on the right
   gfx::fillRect(x0, y - 1, len, 2, true);
   const int n = (int)s.book.spineCount();

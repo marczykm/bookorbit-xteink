@@ -16,13 +16,13 @@
 #include "updater.h"
 #include "reader.h"
 #include <ArduinoJson.h>
+#include <XteinkDetect.h>
 
 #if FREEINK_DEVICE_X4CLASSIC
-#include <XteinkDetect.h>
 // X4 Classic display pins (ESP32-S3)
 constexpr int EPD_SCLK = 12, EPD_MOSI = 11, EPD_CS = 13, EPD_DC = 14, EPD_RST = 10, EPD_BUSY = 18;
 #else
-// Original X4 display pins (ESP32-C3)
+// X4 / X3 display pins (ESP32-C3, the same on both)
 constexpr int EPD_SCLK = 8, EPD_MOSI = 10, EPD_CS = 21, EPD_DC = 4, EPD_RST = 5, EPD_BUSY = 6;
 #endif
 
@@ -250,11 +250,16 @@ Scope entKind = Scope::Author, entLoaded = Scope::All;  // entLoaded: which kind
 int browseSel = 0;
 int fastRefreshes = 0;
 // Which screen is showing. Home is the entry point; Library is its only menu item for now.
-enum class Screen { Home, Browse, Entities, Library, Settings, Picker, Networks, Keyboard, Confirm } screen = Screen::Home;
+enum class Screen { Home, Browse, Entities, Library, Settings, Picker, Networks, Keyboard, Confirm, Setup } screen = Screen::Home;
 bool halfNext = false;  // the next full draw (a screen change) uses the gentler half refresh
 int pickerKind = 0, pickerSel = 0, pickerTop = 0;  // Picker: 0 = companion list, 1 = sleep timer list
 int kbStyle = 0;  // on-screen keyboard: 0 = key grid, 1 = classic T9 (multi-tap phone keypad)
 constexpr const char* kKeyboardFile = "/BookOrbit/.keyboard";
+// First run without a usable /bookorbit.json: a two-step setup (Wi-Fi, then the BookOrbit server and account) replaces the
+// app until the sign-in works; then the settings are saved and the device restarts into the library.
+bool setupMode = false;
+int setupStep = 0;  // 0 = Wi-Fi, 1 = server and account
+int setupSel = 0;   // step 2: 0 server, 1 username, 2 password, 3 sign in
 int settingsSel = 0;  // Settings list: network, server, username, password, keyboard, companion, sleep timer, update
 int homeSel = 0;  // Home menu, counted from the top: Reading now (when present), then Library
 bool firstDraw = true;  // the first draw after power-on / wake / returning from a book is a half refresh too
@@ -302,6 +307,7 @@ static bool pressed(uint8_t button) {
 }
 
 // Serial commands: "F" dumps the framebuffer; "CFG:<json>" saves the settings file to the SD card and reboots.
+static void showList(bool full);
 static void handleSerial() {
   static String line;
   while (Serial.available()) {
@@ -319,6 +325,7 @@ static void handleSerial() {
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "BUSYDOT") { extern void testBusyDot(); testBusyDot(); }  // test hook
+      if (line == "SETUP2" && setupMode) { setupStep = 1; screen = Screen::Setup; showList(false); }  // test hook: the server step
       if (line.startsWith("MODAL:")) gfx::modal("Update failed", line.substring(6).c_str());  // test hook: a notice box with this text
       if (line == "SLEEPSCREEN") drawSleepScreen();  // test hook: draw it without sleeping
       if (line == "CLOSEMOCK") { extern void testCloseMock(); testCloseMock(); }  // test hook: the screen shown while leaving a book
@@ -398,7 +405,15 @@ static void triangle(int cx, int cy, Dir d, bool black) {  // 13 px wide/high po
 }
 
 // Hints sit directly above the four buttons along the bottom edge: Back, OK, Left, Right.
-constexpr int kButtonX[4] = {25, 130, 245, 350}, kButtonW = 106;
+// The four front buttons' positions under a 480 px wide screen, scaled to the panel's width.
+constexpr int kButtonX480[4] = {25, 130, 245, 350}, kButtonW480 = 106;
+#define kButtonX (buttonX())
+#define kButtonW (kButtonW480 * gfx::W / 480)
+static const int* buttonX() {
+  static int x[4];
+  for (int i = 0; i < 4; i++) x[i] = kButtonX480[i] * gfx::W / 480;
+  return x;
+}
 
 // Two circular arrows (sync), about 28 px across and centered on (cx, cy).
 // Icons drawn with float math (slow in software: the C3 has no FPU) are worked out once into a 1-bit mask around their
@@ -813,7 +828,7 @@ static void fitBig(char* s, int maxW, int size) {
 }
 
 static void drawReadingNow(int y, bool sel) {
-  constexpr int kFull = gfx::W - 2 * kMargin;
+  const int kFull = gfx::W - 2 * kMargin;
   char buf[16];
   frame(kMargin, y, kFull, 96, 8, sel);
   label(kMargin + 68, y + 1, "Reading now", sel);
@@ -823,7 +838,7 @@ static void drawReadingNow(int y, bool sel) {
   uint8_t bits[cover::kBytes];
   if (stats.nowId && cover::load(stats.nowId, bits)) gfx::blit1bit(kMargin + 10, y + 13, bits, cover::W, cover::H);
   // The title in a larger face, on one line or wrapped onto two (the second one shortened with "...").
-  constexpr int kTitleW = kFull - 80;
+  const int kTitleW = kFull - 80;
   int kTitleSize = 26;  // one line at 26; a long title is wrapped onto two lines at 24
   char first[96], second[96] = "";
   strlcpy(first, stats.nowTitle, sizeof(first));
@@ -865,7 +880,8 @@ static void drawStats(int y) {
     gfx::text(kMargin, y + 26, "Statistics appear after the first sync.");
     return;
   }
-  constexpr int kHalf = 220, kRight = kMargin + kHalf + 8, kH = 157, kPitch = kH + 6;
+  const int kHalf = (gfx::W - 2 * kMargin - 8) / 2, kRight = kMargin + kHalf + 8;
+  constexpr int kH = 157, kPitch = kH + 6;
   char buf[64];
   // Row 1: the companion and the reading rhythm.
   drawPet(kMargin, y, kHalf, kH, false);  // display only; the companion is chosen in Settings
@@ -1238,7 +1254,9 @@ constexpr const char* kKbRows[3][4] = {
     {"1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM._@"},
     {"!@#$%^&*()", "-_=+[]{};:", "'\"<>,./?\\|", "~`:;#&*()+"},
 };
-constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330, kKbX = 20;
+constexpr int kKeyW = 44, kKeyH = 52, kKeyPitch = 58, kKbTop = 330;
+#define kKbShift ((gfx::W - 480) / 2)  // the keyboards are laid out for 480 px and centred on wider screens
+#define kKbX (20 + kKbShift)
 // Bottom row: mode switch, space, cancel, done.
 constexpr int kBottomX[4] = {20, 130, 268, 368}, kBottomW[4] = {100, 128, 90, 92};
 
@@ -1289,8 +1307,9 @@ static void drawKeyboard(bool full) {
   for (int k = 0; k < 4; k++) {
     const int y = kKbTop + 4 * kKeyPitch;
     const bool sel = kbRow == 4 && kbCol == k;
-    if (sel) roundRect(kBottomX[k], y, kBottomW[k], kKeyH, 6, true); else frame(kBottomX[k], y, kBottomW[k], kKeyH, 6);
-    gfx::text(kBottomX[k] + (kBottomW[k] - gfx::textWidth(labels[k])) / 2, y + 11, labels[k], !sel);
+    const int bx = kBottomX[k] + kKbShift;
+    if (sel) roundRect(bx, y, kBottomW[k], kKeyH, 6, true); else frame(bx, y, kBottomW[k], kKeyH, 6);
+    gfx::text(bx + (kBottomW[k] - gfx::textWidth(labels[k])) / 2, y + 11, labels[k], !sel);
   }
   drawHints(true, true, true);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
@@ -1301,7 +1320,7 @@ static void keyboardMove(int dr, int dc) {
     const int old = kbRow;
     kbRow = (kbRow + dr + 5) % 5;  // wraps: below the bottom row is the top one
     if (kbRow == 4 && old != 4) kbCol = constrain(kbCol * 4 / 10, 0, 3);  // keep roughly the same x
-    if (old == 4 && kbRow != 4) kbCol = constrain((kBottomX[kbCol] + kBottomW[kbCol] / 2 - kKbX) / kKeyW, 0, 9);
+    if (old == 4 && kbRow != 4) kbCol = constrain((kBottomX[kbCol] + kKbShift + kBottomW[kbCol] / 2 - kKbX) / kKeyW, 0, 9);
   }
   if (dc) {  // wraps along the row
     const int n = kbRow == 4 ? 4 : 10;
@@ -1310,7 +1329,9 @@ static void keyboardMove(int dr, int dc) {
 }
 
 // Cancel (done = false) or accept (done = true) what was typed. Returns true when the keyboard was closed.
+static bool setupKeyboardFinish(bool done);
 static bool keyboardFinish(bool done) {
+  if (setupMode) return setupKeyboardFinish(done);
   if (!done) {
     screen = (kbTarget == KbSsid || kbTarget == KbWifiPassword) ? Screen::Networks : Screen::Settings;
     return true;
@@ -1431,7 +1452,8 @@ static void drawT9(bool full) {
   shown += "_";
   gfx::text(kMargin + 14, 124, shown.c_str());
   gfx::text(kMargin, 184, "Press a key again for the next letter");
-  constexpr int kCellW = 144, kCellH = 64, kPitchY = 72, kTop = 230, kLeft = 16;
+  constexpr int kCellW = 144, kCellH = 64, kPitchY = 72, kTop = 230;
+  const int kLeft = 16 + kKbShift;
   for (int r = 0; r < 4; r++)
     for (int c = 0; c < 3; c++) {
       const int id = r * 3 + c, x = kLeft + c * (kCellW + 8), y = kTop + r * kPitchY;
@@ -1513,6 +1535,7 @@ static void switchServer() {
   showList(false);
 }
 
+static void setupJoinWifi(const String& password);
 static void networkChosen() {
   if (netSel >= scanCount) {  // other network: type its name first
     pendingSsid = "";
@@ -1521,6 +1544,10 @@ static void networkChosen() {
   }
   pendingSsid = scanList[netSel].ssid;
   if (scanList[netSel].open) {
+    if (setupMode) {
+      setupJoinWifi("");
+      return;
+    }
     saveWifiCreds(pendingSsid, "");
     screen = Screen::Settings;
     showList(false);
@@ -1574,6 +1601,7 @@ static void drawEntities(bool full) {
   halfNext = false;
 }
 
+static void drawSetup(bool full);
 static void drawScreen(bool full) {  // draws whichever screen is current
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
@@ -1584,6 +1612,7 @@ static void drawScreen(bool full) {  // draws whichever screen is current
   else if (screen == Screen::Networks) drawNetworks(full);
   else if (screen == Screen::Keyboard) drawKeyboard(full);
   else if (screen == Screen::Confirm) drawConfirm(full);
+  else if (screen == Screen::Setup) drawSetup(full);
   else drawList(full);
 }
 
@@ -1828,6 +1857,7 @@ static void waitForKey() {
   anyCount = 0;
   do {
     delay(20);
+    handleSerial();  // (test hooks: a key sent over serial counts too)
   } while (anyCount == 0 && injected < 0);
   injected = -1;
 }
@@ -2281,6 +2311,10 @@ void setup() {
   Serial.println("bookorbit-xteink");
   lastActivity = millis();
 
+  // X3 or X4 (one binary for both): the X3's extra I2C chips tell them apart. Before anything reads the board profile.
+  const bool x3 = freeink::selectXteinkDevice();
+  if (x3) display.setDisplayX3();
+  Serial.printf("device: %s\n", x3 ? "X3" : "X4");
   BoardConfig::releaseSdRail();
   input.begin();
   xTaskCreate(inputTask, "input", 3072, nullptr, 2, nullptr);
@@ -2330,7 +2364,14 @@ void setup() {
   openLibraryMagic = 0;
   quietSync = esp_reset_reason() == ESP_RST_SW;
   String error;
-  if (!initApi(error)) fatal("Setup needed", error + "\nSee config.example.json");
+  if (!initApi(error)) {
+    Serial.printf("setup needed: %s\n", error.c_str());
+    setupMode = true;
+    setupStep = 0;
+    screen = Screen::Setup;
+    showList(true);
+    return;
+  }
   if (loadCachedPage(0)) {  // show the library right away and connect in the background
     net = Net::Connecting;
     netStart = millis();
@@ -2524,6 +2565,186 @@ static void firmwareUpdate() {
   ESP.restart();
 }
 
+// ---- First-run setup -----------------------------------------------------------------------------------------
+
+static void drawSetup(bool full) {
+  gfx::clear();
+  header(setupStep == 0 ? "Setup 1/2: Wi-Fi" : "Setup 2/2: BookOrbit");
+  int y = 70;
+  const int w = gfx::W - 2 * kMargin;
+  if (setupStep == 0) {
+    gfx::bigText(kMargin, y, "Welcome", 30);
+    y += 54;
+    y = wrapText(kMargin, y, w, "First, connect the reader to your Wi-Fi. It is used to sync your library, reading progress "
+                                "and statistics with your BookOrbit server.");
+    const int by = y + 30;
+    roundRect(kMargin, by, w, 60, 8, true);
+    const char* label = "Choose network";
+    gfx::text(kMargin + (w - gfx::textWidth(label)) / 2, by + 15, label, false);
+    drawHints(false, true, false);
+  } else {
+    char line[96];
+    snprintf(line, sizeof(line), "Connected to %s", config.ssid.c_str());
+    gfx::text(kMargin, y, gfx::ellipsize(line, w));
+    y += gfx::lineHeight() + 10;
+    y = wrapText(kMargin, y, w, "Now sign in to your BookOrbit server.");
+    y += 16;
+    String stars;
+    for (size_t k = 0; k < config.password.length() && k < 10; k++) stars += '*';
+    const char* names[3] = {"Server", "Username", "Password"};
+    const String values[3] = {config.server, config.username, stars};
+    for (int i = 0; i < 3; i++) {
+      const bool sel = setupSel == i;
+      if (sel) roundRect(kMargin, y, w, 52, 8, true); else frame(kMargin, y, w, 52);
+      gfx::text(kMargin + 14, y + 11, names[i], !sel);
+      const int valueX = gfx::W - kMargin - 14;
+      const char* v = gfx::ellipsize(values[i].c_str(), valueX - (kMargin + 14 + gfx::textWidth(names[i])) - 16);
+      gfx::text(valueX - gfx::textWidth(v), y + 11, v, !sel);
+      y += 58;
+    }
+    const bool sel = setupSel == 3;
+    const int by = y + 14;
+    if (sel) roundRect(kMargin, by, w, 60, 8, true); else frame(kMargin, by, w, 60);
+    const char* label = "Sign in";
+    gfx::text(kMargin + (w - gfx::textWidth(label)) / 2, by + 15, label, !sel);
+    drawHints(true, true, false);
+  }
+  gfx::flush(!full ? EInkDisplay::FAST_REFRESH : (firstDraw || halfNext) ? EInkDisplay::HALF_REFRESH : EInkDisplay::FULL_REFRESH);
+  firstDraw = false;
+  halfNext = false;
+}
+
+// Step 1 ends here: join the chosen network; on success go on to the server step, otherwise back to the list.
+static void setupJoinWifi(const String& password) {
+  config.ssid = pendingSsid;
+  config.wifiPassword = password;
+  syncModal("Connecting", "Wi-Fi: " + config.ssid);
+  String error;
+  if (connectWifi(error)) {
+    Serial.printf("setup: wifi ok, ip %s\n", WiFi.localIP().toString().c_str());
+    setupStep = 1;
+    setupSel = config.server.isEmpty() ? 0 : config.username.isEmpty() ? 1 : config.password.isEmpty() ? 2 : 3;
+    screen = Screen::Setup;
+  } else {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    syncModal("Could not connect", error + ". Check the password and try again.");
+    waitForKey();
+    screen = Screen::Networks;
+  }
+  showList(true);
+}
+
+// Step 2 ends here: sign in with what was typed; on success save everything and start the app.
+static void setupSignIn() {
+  if (config.server.isEmpty() || config.username.isEmpty() || config.password.isEmpty()) {
+    syncModal("Almost there", "Fill in the server, username and password.");
+    waitForKey();
+    showList(false);
+    return;
+  }
+  syncModal("Signing in", config.server);
+  String error;
+  if (WiFi.status() != WL_CONNECTED && !connectWifi(error)) {
+    syncModal("Wi-Fi lost", error);
+    waitForKey();
+    showList(false);
+    return;
+  }
+  api.configure(config.server, config.insecureTls);
+  if (!api.login(config.username, config.password, error)) {
+    Serial.printf("setup: sign-in failed: %s\n", error.c_str());
+    syncModal("Sign-in failed", error);
+    waitForKey();
+    showList(false);
+    return;
+  }
+  JsonDocument doc;  // keep anything else that is already in the file
+  if (SdMan.exists("/bookorbit.json")) deserializeJson(doc, SdMan.readFile("/bookorbit.json"));
+  doc["ssid"] = config.ssid;
+  doc["wifiPassword"] = config.wifiPassword;
+  doc["server"] = config.server;
+  doc["username"] = config.username;
+  doc["password"] = config.password;
+  String json;
+  serializeJsonPretty(doc, json);
+  SdMan.writeFile("/bookorbit.json", json);
+  syncModal("All set", "Opening your library...");
+  delay(1200);
+  ESP.restart();
+}
+
+// Keyboard closed during setup: Wi-Fi name and password lead on to joining; server and account go back to step 2.
+static bool setupKeyboardFinish(bool done) {
+  const bool wifi = kbTarget == KbSsid || kbTarget == KbWifiPassword;
+  if (!done) {
+    screen = wifi ? Screen::Networks : Screen::Setup;
+    return true;
+  }
+  if (kbTarget == KbSsid) {
+    if (kbText.isEmpty()) return false;
+    pendingSsid = kbText;
+    openKeyboard(KbWifiPassword, "");  // now the password
+    return true;
+  }
+  if (kbTarget == KbWifiPassword) {
+    setupJoinWifi(kbText);
+    return true;
+  }
+  if (kbTarget == KbServer) {
+    const String value = normalizeServer(kbText);
+    if (value.isEmpty()) return false;  // not an http(s):// address
+    config.server = value;
+  } else if (kbTarget == KbUsername) {
+    config.username = kbText;
+  } else {
+    config.password = kbText;
+  }
+  if (setupSel < 3) setupSel++;  // on to the next field (or Sign in)
+  screen = Screen::Setup;
+  return true;
+}
+
+static void setupLoop() {
+  if (setupStep == 0) {
+    if (pressed(InputManager::BTN_CONFIRM)) openNetworks();
+    return;
+  }
+  if (backClicked()) {  // back to choosing the network
+    setupStep = 0;
+    showList(false);
+  } else if (pressed(InputManager::BTN_DOWN)) {
+    setupSel = (setupSel + 1) % 4;
+    showList(false);
+  } else if (pressed(InputManager::BTN_UP)) {
+    setupSel = (setupSel + 3) % 4;
+    showList(false);
+  } else if (pressed(InputManager::BTN_CONFIRM)) {
+    if (setupSel == 0) openKeyboard(KbServer, config.server.isEmpty() ? String("http://") : config.server);
+    else if (setupSel == 1) openKeyboard(KbUsername, config.username);
+    else if (setupSel == 2) openKeyboard(KbPassword, config.password);
+    else setupSignIn();
+  }
+}
+
+// Applies all arrow presses waiting on the keyboard (several pile up while a slow panel refreshes) and returns how many,
+// so the keyboard is drawn once for the lot instead of once per step.
+static int keyboardMoves(bool t9) {
+  int n = 0;
+  const struct { uint8_t button; int dr, dc; } kArrows[4] = {
+      {InputManager::BTN_UP, -1, 0}, {InputManager::BTN_DOWN, 1, 0}, {InputManager::BTN_LEFT, 0, -1}, {InputManager::BTN_RIGHT, 0, 1}};
+  for (bool any = true; any;) {
+    any = false;
+    for (const auto& a : kArrows)
+      if (pressed(a.button)) {
+        if (t9) t9Move(a.dr, a.dc); else keyboardMove(a.dr, a.dc);
+        n++;
+        any = true;
+      }
+  }
+  return n;
+}
+
 void loop() {
   handleSerial();
   if (anyCount || injected >= 0) {
@@ -2543,7 +2764,7 @@ void loop() {
     return;
   }
   pumpDisplay();
-  backgroundSync();
+  if (!setupMode) backgroundSync();
   netIdle();
   if (screen == Screen::Home) {
     if (pressed(InputManager::BTN_RIGHT)) {
@@ -2598,17 +2819,7 @@ void loop() {
       if (kbText.length()) kbText.remove(kbText.length() - 1);
       t9LastKey = -1;
       showList(false);
-    } else if (pressed(InputManager::BTN_UP)) {
-      if (t9) t9Move(-1, 0); else keyboardMove(-1, 0);
-      showList(false);
-    } else if (pressed(InputManager::BTN_DOWN)) {
-      if (t9) t9Move(1, 0); else keyboardMove(1, 0);
-      showList(false);
-    } else if (pressed(InputManager::BTN_LEFT)) {
-      if (t9) t9Move(0, -1); else keyboardMove(0, -1);
-      showList(false);
-    } else if (pressed(InputManager::BTN_RIGHT)) {
-      if (t9) t9Move(0, 1); else keyboardMove(0, 1);
+    } else if (keyboardMoves(t9) > 0) {  // every arrow press so far, drawn once
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
       if (t9) t9Press(); else keyboardPress();
@@ -2617,8 +2828,19 @@ void loop() {
     delay(10);
     return;
   }
+  if (screen == Screen::Setup) {
+    setupLoop();
+    delay(10);
+    return;
+  }
   if (screen == Screen::Networks) {
     if (backClicked()) {  // leave: rejoin the saved network that the scan may have interrupted
+      if (setupMode) {
+        screen = Screen::Setup;
+        showList(false);
+        delay(10);
+        return;
+      }
       screen = Screen::Settings;
       if (net != Net::Offline) startWifi();
       showList(false);
