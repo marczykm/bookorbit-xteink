@@ -3,6 +3,7 @@
 #include <math.h>
 
 #include "gfx.h"
+#include "touch.h"
 
 namespace ui {
 namespace {
@@ -96,6 +97,13 @@ void drawSyncIcon(int cx, int cy, float f, bool slash) {
 void drawHints(bool back, bool ok, bool paging, bool menu) {
   const int top = gfx::H - 52, y = gfx::H - 42;
   gfx::fillRect(0, top, gfx::W, 2, true);
+  // On a touchscreen each icon is also a button.
+  if (back || menu) touch::press(buttonX(0), top, buttonW(), 52, InputManager::BTN_BACK);
+  if (ok) touch::press(buttonX(1), top, buttonW(), 52, InputManager::BTN_CONFIRM);
+  if (paging) {
+    touch::press(buttonX(2), top, buttonW(), 52, InputManager::BTN_LEFT);
+    touch::press(buttonX(3), top, buttonW(), 52, InputManager::BTN_RIGHT);
+  }
   const auto center = [](int i, int w) { return buttonX(i) + (buttonW() - w) / 2; };
   // Back: a return arrow (shaft out to the right, down, and back left) so it isn't mistaken for the Left arrow.
   const int bx = center(0, 30), by = y + 6;

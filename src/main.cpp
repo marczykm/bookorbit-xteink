@@ -13,8 +13,10 @@
 #include "cover.h"
 #include "pets.h"
 #include "gfx.h"
+#include "light.h"
 #include "outbox.h"
 #include "stats.h"
+#include "touch.h"
 #include "updater.h"
 #include "reader.h"
 #include "ui.h"
@@ -26,6 +28,9 @@ using namespace ui;  // the screens below are built from its shapes and icons
 #if FREEINK_DEVICE_X4CLASSIC
 // X4 Classic display pins (ESP32-S3)
 constexpr int EPD_SCLK = 12, EPD_MOSI = 11, EPD_CS = 13, EPD_DC = 14, EPD_RST = 10, EPD_BUSY = 18;
+#elif FREEINK_DEVICE_X4PRO
+// X4 Pro display pins (ESP32-S3, see freeink-sdk/docs/xteink-x4pro-support.md)
+constexpr int EPD_SCLK = 12, EPD_MOSI = 11, EPD_CS = 13, EPD_DC = 18, EPD_RST = 14, EPD_BUSY = 6;
 #else
 // X4 / X3 display pins (ESP32-C3, the same on both)
 constexpr int EPD_SCLK = 8, EPD_MOSI = 10, EPD_CS = 21, EPD_DC = 4, EPD_RST = 5, EPD_BUSY = 6;
@@ -212,6 +217,7 @@ static void inputTask(void*) {
       if (input.wasPressed(b) && pressCount[b] < 4) pressCount[b] = pressCount[b] + 1;
     if (input.wasAnyPressed() && anyCount < 250) anyCount = anyCount + 1;
     if (input.wasReleased(InputManager::BTN_BACK)) backReleased = true;
+    if (touch::capture(input) && anyCount < 250) anyCount = anyCount + 1;  // taps and swipes are handled in loop()
     vTaskDelay(pdMS_TO_TICKS(8));
   }
 }
@@ -239,6 +245,14 @@ static void handleSerial() {
         ESP.restart();
       }
       if (line == "SLEEP") goToSleep();
+      // test hooks for touch: TAP:x,y (portrait pixels), SWIPE:L/R/U/D (the direction the finger moves), HOME, HOMELONG
+      if (line.startsWith("TAP:")) touch::inject({touch::Gesture::Tap, (int16_t)line.substring(4).toInt(), (int16_t)line.substring(line.indexOf(',') + 1).toInt()});
+      if (line.startsWith("SWIPE:")) {
+        const char d = line[6];
+        touch::inject({d == 'L' ? touch::Gesture::SwipeLeft : d == 'R' ? touch::Gesture::SwipeRight : d == 'U' ? touch::Gesture::SwipeUp : touch::Gesture::SwipeDown, 0, 0});
+      }
+      if (line == "HOME") touch::inject({touch::Gesture::Home, 0, 0});
+      if (line == "HOMELONG") touch::inject({touch::Gesture::HomeLong, 0, 0});
       if (line == "TESTNOW") { extern void testFakeNow(); testFakeNow(); }  // test hook
       if (line == "SYNCMODAL") { extern void testSyncModal(); testSyncModal(); }  // test hook
       if (line == "SETUP2" && setupMode) { setupStep = 1; screen = Screen::Setup; showList(false); }  // test hook: the server step
@@ -349,6 +363,7 @@ static void drawList(bool full) {
     label(textX, y + 4, gfx::ellipsize(books[i].title, textW), sel);
     label(textX, y + 4 + gfx::lineHeight() - 2, gfx::ellipsize(books[i].author, textW), sel);
     if (SdMan.exists(BookOrbit::pathFor(books[i]).c_str())) drawDownloadedIcon(gfx::W - 16 - 14, y + 24 - 2, !sel);  // on the card
+    touch::target(0, y, gfx::W, kRowHeight, &selected, i);
   }
   if (bookCount == 0) gfx::text(kMargin, 120, "No books found");
   drawHints();
@@ -594,10 +609,12 @@ static void drawHome(bool full) {
   int y = kListTop;
   if (stats.readingNow()) {
     drawReadingNow(y, readingSelected());
+    touch::target(kMargin, y, gfx::W - 2 * kMargin, 96, &homeSel, 0);
     y += 102;
   }
   const bool sel = librarySelected();
   frame(kMargin, y, gfx::W - 2 * kMargin, kRowHeight - 4, 8, sel);
+  touch::target(kMargin, y, gfx::W - 2 * kMargin, kRowHeight - 4, &homeSel, stats.readingNow() ? 1 : 0);
   // Library icon: books standing on a shelf, one leaning. Ink is white on the highlighted (black) row.
   const bool ink = !sel;
   const int ix = kMargin + 14, iy = y + 12, base = iy + 44;  // base = the shelf's top edge
@@ -631,22 +648,39 @@ static void setSleep(int minutes) {
   SdMan.writeFile(kSleepFile, String(sleepMinutes));
 }
 
+// The Settings rows; Light only on a board with a frontlight. settingsSel counts the rows shown.
+enum SettingRow { SetNetwork, SetServer, SetUsername, SetPassword, SetKeyboard, SetCompanion, SetSleep, SetLight, SetUpdate };
+static int settingsCount() { return light::available() ? 9 : 8; }
+static SettingRow settingsRow(int i) { return (SettingRow)(light::available() || i < SetLight ? i : i + 1); }
+
+static String lightText() {
+  if (light::brightness() == 0) return "Off";
+  String s = String(light::brightness()) + "%";
+  if (light::hasWarmth()) s += ", warmth " + String(light::warmth()) + "%";
+  return s;
+}
+
 static void drawSettings(bool full) {
   gfx::clear();
   header("Settings");
-  // Rows are grouped under section headings; settingsSel counts rows only.
-  const char* sectionOf[8] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr, "Firmware"};  // heading above the row
-  const char* names[8] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after", "Update"};
+  // Rows are grouped under section headings (shown above the row); settingsSel counts rows only.
+  const char* sectionOf[9] = {"Wi-Fi", "Account", nullptr, nullptr, "Device", nullptr, nullptr, nullptr, "Firmware"};
+  const char* names[9] = {"Network", "Server", "Username", "Password", "Keyboard", "Companion", "Sleep after", "Light", "Update"};
   String sleepText = String(sleepMinutes) + " min";
-  const String values[8] = {config.ssid, config.server, config.username, masked(config.password), kbStyle ? "Classic T9" : "Key grid", pets::kNames[petIndex], sleepText, String("v") + updater::currentVersion()};
-  constexpr int kRowPitch = 58, kHeadingH = 34;
+  const String values[9] = {config.ssid, config.server, config.username, masked(config.password), kbStyle ? "Classic T9" : "Key grid",
+                            pets::kNames[petIndex], sleepText, lightText(), String("v") + updater::currentVersion()};
+  const int n = settingsCount();
+  const int kRowPitch = n > 8 ? 54 : 58;  // a ninth row has to fit above the battery line
+  constexpr int kHeadingH = 34;
   int y = 60;
-  for (int i = 0; i < 8; i++) {
-    if (sectionOf[i]) {
-      heading(y, sectionOf[i]);
+  for (int i = 0; i < n; i++) {
+    const SettingRow row = settingsRow(i);
+    if (sectionOf[row]) {
+      heading(y, sectionOf[row]);
       y += kHeadingH;
     }
-    valueRow(y, names[i], values[i], i == settingsSel);
+    valueRow(y, names[row], values[row], i == settingsSel);
+    touch::target(kMargin, y, gfx::W - 2 * kMargin, 52, &settingsSel, i);
     y += kRowPitch;
   }
   heading(y, "About");  // read-only facts
@@ -692,6 +726,7 @@ static void drawPicker(bool full) {
     const bool sel = i == pickerSel;
     if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, 8, true);
     else frame(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6);
+    touch::target(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, &pickerSel, i);
     gfx::text(kMargin + 14, y + 16, pickerLabel(i).c_str(), !sel);
     if (i == cur) {  // a tick marks the value in use
       const int tx = gfx::W - kMargin - 40, ty = y + 22;
@@ -858,6 +893,7 @@ static void drawNetworks(bool full) {
     const bool sel = i == netSel;
     if (sel) roundRect(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, 8, true);
     else frame(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6);
+    touch::target(kMargin, y, gfx::W - 2 * kMargin, kPickerRowH - 6, &netSel, i);
     if (i < scanCount) {
       const ScanEntry& e = scanList[i];
       const bool current = config.ssid == e.ssid;
@@ -914,6 +950,12 @@ static void openKeyboard(int target, const String& startText) {
   showList(false);
 }
 
+// A tapped key of the grid keyboard: 0-39 the four rows of ten, 40-43 the bottom row.
+static void kbTapKey(int key) {
+  kbRow = key / 10;
+  kbCol = key % 10;
+}
+
 static void drawKeyboard(bool full) {
   if (kbStyle == 1 && !t9Sym) {
     drawT9(full);
@@ -926,6 +968,7 @@ static void drawKeyboard(bool full) {
       const int x = kKbX + c * kKeyW, y = kKbTop + r * kKeyPitch;
       const bool sel = r == kbRow && c == kbCol;
       if (sel) roundRect(x + 2, y, kKeyW - 4, kKeyH, 6, true); else frame(x + 2, y, kKeyW - 4, kKeyH, 6);
+      touch::targetFn(x, y - 3, kKeyW, kKeyPitch, kbTapKey, r * 10 + c);
       const char key[2] = {keys[c], 0};
       gfx::text(x + (kKeyW - gfx::textWidth(key)) / 2, y + 11, key, !sel);
     }
@@ -937,6 +980,7 @@ static void drawKeyboard(bool full) {
     const bool sel = kbRow == 4 && kbCol == k;
     const int bx = kBottomX[k] + kKbShift;
     if (sel) roundRect(bx, y, kBottomW[k], kKeyH, 6, true); else frame(bx, y, kBottomW[k], kKeyH, 6);
+    touch::targetFn(bx, y - 3, kBottomW[k], kKeyPitch, kbTapKey, 40 + k);
     gfx::text(bx + (kBottomW[k] - gfx::textWidth(labels[k])) / 2, y + 11, labels[k], !sel);
   }
   drawHints(true, true, true);
@@ -1068,6 +1112,12 @@ static bool t9Press() {
   return false;
 }
 
+// A tapped key of the T9 keyboard: 0-11 the keypad, 12-13 Cancel and Done.
+static void t9TapKey(int key) {
+  t9Row = key / 3;
+  t9Col = key < 12 ? key % 3 : key - 12;
+}
+
 static void drawT9(bool full) {
   drawTextField("Press a key again for the next letter");
   constexpr int kCellW = 144, kCellH = 64, kPitchY = 72, kTop = 230;
@@ -1077,6 +1127,7 @@ static void drawT9(bool full) {
       const int id = r * 3 + c, x = kLeft + c * (kCellW + 8), y = kTop + r * kPitchY;
       const bool sel = r == t9Row && c == t9Col;
       if (sel) roundRect(x, y, kCellW, kCellH, 8, true); else frame(x, y, kCellW, kCellH, 8);
+      touch::targetFn(x, y, kCellW, kCellH, t9TapKey, id);
       String label = kT9Labels[id];
       if (id == 9) label = t9Mode == 0 ? "*  abc" : t9Mode == 1 ? "*  Abc" : "*  ABC";
       else if (t9Mode == 2) label.toUpperCase();
@@ -1088,6 +1139,7 @@ static void drawT9(bool full) {
     const int bx = kLeft + k * (w + 8);
     const bool sel = t9Row == 4 && t9Col == k;
     if (sel) roundRect(bx, y, w, kCellH, 8, true); else frame(bx, y, w, kCellH, 8);
+    touch::targetFn(bx, y, w, kCellH, t9TapKey, 12 + k);
     gfx::text(bx + (w - gfx::textWidth(labels[k])) / 2, y + 17, labels[k], !sel);
   }
   drawHints(true, true, true);
@@ -1111,7 +1163,10 @@ static void drawConfirm(bool full) {
                "positions waiting to sync. Books you copied to the card yourself are not touched. After switching, set your "
                "username and password for the new server.");
   const char* labels[2] = {"Cancel", "Switch and clear data"};
-  for (int i = 0; i < 2; i++) button(y + 24 + i * 72, labels[i], i == confirmSel);
+  for (int i = 0; i < 2; i++) {
+    button(y + 24 + i * 72, labels[i], i == confirmSel);
+    touch::target(kMargin, y + 24 + i * 72, gfx::W - 2 * kMargin, 60, &confirmSel, i);
+  }
   drawHints(true, true, false);
   gfx::flush(!full ? EInkDisplay::FAST_REFRESH : EInkDisplay::FULL_REFRESH);
 }
@@ -1153,6 +1208,7 @@ static void drawBrowse(bool full) {
     const int y = kListTop + i * kRowHeight;
     const bool sel = i == browseSel;
     if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
+    touch::target(0, y, gfx::W, kRowHeight, &browseSel, i);
     char sub[32] = "";
     const int n = i == 0 ? stats.books : i == 1 ? stats.authors : i == 2 ? stats.series : 0;
     if (n > 0) snprintf(sub, sizeof(sub), "%d %s", n, i == 0 ? "books" : i == 1 ? "authors" : "series");
@@ -1175,6 +1231,7 @@ static void drawEntities(bool full) {
     const int y = kListTop + i * kRowHeight;
     const bool sel = i == entSel;
     if (sel) gfx::fillRect(0, y, gfx::W, kRowHeight - 4, true);
+    touch::target(0, y, gfx::W, kRowHeight, &entSel, i);
     char sub[24];
     snprintf(sub, sizeof(sub), entities[i].count == 1 ? "%d book" : "%d books", entities[i].count);
     label(kMargin + 4, y + 4, gfx::ellipsize(entities[i].name, gfx::W - 2 * kMargin - 8), sel);
@@ -1187,6 +1244,7 @@ static void drawEntities(bool full) {
 
 static void drawSetup(bool full);
 static void drawScreen(bool full) {  // draws whichever screen is current
+  touch::clear();  // each screen registers what can be tapped as it draws
   // Quick refreshes only: no periodic full-screen cleanup (a full refresh flashes the whole panel).
   if (screen == Screen::Home) drawHome(full);
   else if (screen == Screen::Browse) drawBrowse(full);
@@ -1647,6 +1705,7 @@ static void syncBeforeSleep() {
   if (WiFi.getMode() != WIFI_OFF) WiFi.mode(WIFI_OFF);
   drawSleepScreen();
   gfx::waitIdle();
+  light::sleep();
   display.deepSleep();
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
@@ -1703,6 +1762,9 @@ static void drawMenuBox(const char* title, int h, int& x, int& y, int& w) {
   y = 250;
   gfx::waitIdle();
   gfx::fadeBackground();
+  touch::clear();  // only the box can be tapped; a tap beside it closes it (Back)
+  touch::press(0, 0, gfx::W, gfx::H, InputManager::BTN_BACK);
+  touch::press(x, y, w, h, touch::kNoButton);
   frame(x, y, w, h, 12);
   gfx::bigText(x + 18, y + 8, title, 18);
   gfx::fillRect(x + 10, y + 34, w - 20, 2, true);
@@ -1711,12 +1773,13 @@ static void drawMenuBox(const char* title, int h, int& x, int& y, int& w) {
 // A menu box over the page with `n` rows, row `selected` highlighted; row(i, buf) writes the text of row i into a 24-byte
 // buffer.
 template <typename Row>
-static void drawMenuRows(const char* title, int n, int selected, Row row) {
+static void drawMenuRows(const char* title, int n, int& selected, Row row) {
   int x, y, w;
   drawMenuBox(title, menuHeight(n), x, y, w);
   for (int i = 0; i < n; i++) {
     const int ry = y + 40 + i * kMenuRowH;
     const bool sel = i == selected;
+    touch::target(x + 8, ry, w - 16, kMenuRowH - 4, &selected, i);
     if (sel) roundRect(x + 8, ry, w - 16, kMenuRowH - 4, 6, true);
     char text[24];
     row(i, text);
@@ -1754,6 +1817,7 @@ static void drawReaderMenu() {
     if (readerMenuSel >= tocTop + visible) tocTop = readerMenuSel - visible + 1;
     gfx::waitIdle();
     gfx::clear();
+    touch::clear();
     menuBoxH = gfx::H;
     gfx::fillRect(0, 46, gfx::W, 2, true);
     gfx::text(kMargin, 7, "Contents");
@@ -1762,6 +1826,7 @@ static void drawReaderMenu() {
       const int i = tocTop + r, ry = 56 + r * rh;
       const bool sel = i == readerMenuSel;
       if (sel) roundRect(kMargin - 6, ry, gfx::W - 2 * kMargin + 12, rh - 4, 6, true);
+      touch::target(kMargin - 6, ry, gfx::W - 2 * kMargin + 12, rh - 4, &readerMenuSel, i);
       const int indent = min(2, (int)reader::tocDepth(i)) * 18;
       const int tw = gfx::W - 2 * kMargin - indent - 24;
       gfx::text(kMargin + 6 + indent, ry + 8, gfx::ellipsize(reader::tocTitle(i), tw), !sel);
@@ -1779,6 +1844,96 @@ static void drawHomeMenuBox() {
 static void drawHomeMenu() {
   drawHomeMenuBox();
   gfx::flush(EInkDisplay::FAST_REFRESH);
+}
+
+// ---- Light panel (a long press on Home, or Settings > Light): brightness and warmth with - and + ----------------------
+
+static bool lightOpen = false;
+static int lightRow = 0;  // the row the side keys change: 0 brightness, 1 warmth
+static bool lightDirty = false;
+
+// A tapped - or +: row * 2, plus 1 for +.
+static void lightStep(int key) {
+  lightRow = key / 2;
+  const int d = key % 2 ? 10 : -10;
+  if (lightRow == 0) light::set(light::brightness() + d, light::warmth());
+  else light::set(light::brightness(), light::warmth() + d);
+  lightDirty = true;
+}
+
+static void drawLightPanel() {
+  const int rows = light::hasWarmth() ? 2 : 1, rowH = 64;
+  const int w = min(gfx::W - 60, 400), h = 56 + rows * rowH, x = (gfx::W - w) / 2, y = 250;
+  gfx::waitIdle();
+  gfx::fadeBackground();
+  touch::clear();  // a tap beside the box closes it
+  touch::press(0, 0, gfx::W, gfx::H, InputManager::BTN_BACK);
+  touch::press(x, y, w, h, touch::kNoButton);
+  frame(x, y, w, h, 12);
+  gfx::bigText(x + 18, y + 8, "Light", 18);
+  gfx::fillRect(x + 10, y + 34, w - 20, 2, true);
+  for (int r = 0; r < rows; r++) {
+    const int ry = y + 46 + r * rowH, value = r == 0 ? light::brightness() : light::warmth();
+    if (r == lightRow) ui::triangle(x + 16, ry + 24, Dir::Right, true);  // the row the side keys change
+    gfx::text(x + 28, ry + 12, r == 0 ? "Brightness" : "Warmth");
+    char text[16];
+    if (r == 0 && value == 0) strlcpy(text, "Off", sizeof(text));
+    else snprintf(text, sizeof(text), "%d%%", value);
+    const int minusX = x + w - 176, plusX = x + w - 66;
+    frame(minusX, ry, 52, 48, 8);
+    gfx::fillRect(minusX + 16, ry + 22, 20, 4, true);
+    gfx::text(minusX + 52 + (58 - gfx::textWidth(text)) / 2, ry + 12, text);
+    frame(plusX, ry, 52, 48, 8);
+    gfx::fillRect(plusX + 16, ry + 22, 20, 4, true);
+    gfx::fillRect(plusX + 24, ry + 14, 4, 20, true);
+    touch::targetFn(minusX - 6, ry - 6, 64, 60, lightStep, r * 2, touch::kNoButton);
+    touch::targetFn(plusX - 6, ry - 6, 64, 60, lightStep, r * 2 + 1, touch::kNoButton);
+  }
+  gfx::flush(EInkDisplay::FAST_REFRESH);
+}
+
+static void closeReaderMenu(bool redraw);
+static void openLight() {
+  if (!light::available() || lightOpen) return;
+  if (reader::isOpen()) {
+    if (readerMenu != RMenu::None) closeReaderMenu(false);
+    reader::uiFont(true);  // the panel's text in the book's face (the UI font is not loaded while reading)
+  }
+  lightOpen = true;
+  lightRow = 0;
+  // Presses left over from what opened it (Back counts are not consumed by screens that act on its release).
+  pressCount[InputManager::BTN_BACK] = pressCount[InputManager::BTN_CONFIRM] = 0;
+  backReleased = false;
+  drawLightPanel();
+}
+
+static void closeLight() {
+  lightOpen = false;
+  light::save();
+  if (reader::isOpen()) {
+    reader::uiFont(false);
+    reader::draw(false);
+  } else {
+    showList(false);
+  }
+}
+
+static bool backClicked();
+
+// While the panel is open: the side keys (Up/Down) change the marked row, Back or the Home key closes it.
+static void lightLoop() {
+  if (lightDirty) {
+    lightDirty = false;
+    drawLightPanel();
+  }
+  const bool up = pressed(InputManager::BTN_UP) || pressed(InputManager::BTN_RIGHT);
+  const bool down = !up && (pressed(InputManager::BTN_DOWN) || pressed(InputManager::BTN_LEFT));
+  if (up || down) {
+    lightStep(lightRow * 2 + (up ? 1 : 0));
+  } else if (backClicked() || pressed(InputManager::BTN_CONFIRM)) {
+    pressCount[InputManager::BTN_BACK] = 0;
+    closeLight();
+  }
 }
 
 static void closeReaderMenu(bool redraw) {
@@ -1893,15 +2048,20 @@ void setup() {
   // X3 or X4 (one binary for both): the X3's extra I2C chips tell them apart. Before anything reads the board profile.
   const bool x3 = freeink::selectXteinkDevice();
   if (x3) display.setDisplayX3();
+#if FREEINK_DEVICE_X4PRO
+  Serial.println("device: X4 Pro");
+#else
   Serial.printf("device: %s\n", x3 ? "X3" : "X4");
+#endif
   BoardConfig::releaseSdRail();
   input.begin();
   xTaskCreate(inputTask, "input", 3072, nullptr, 2, nullptr);
-#if FREEINK_DEVICE_X4CLASSIC
+#if FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_X4PRO
   freeink::applyXteinkDisplayController();
 #endif
   // The SD card must be mounted before the display driver claims the shared SPI bus.
   const bool sdOk = SdMan.begin();
+  if (sdOk) light::begin();  // the saved frontlight level (X4 Pro)
   if (sdOk && SdMan.exists(kKeyboardFile)) kbStyle = atoi(SdMan.readFile(kKeyboardFile).c_str()) == 1 ? 1 : 0;
   if (sdOk && SdMan.exists(kSleepFile)) {
     const int m = atoi(SdMan.readFile(kSleepFile).c_str());
@@ -2166,6 +2326,7 @@ static void drawSetup(bool full) {
     y = wrapText(kMargin, y, w, "First, connect the reader to your Wi-Fi. It is used to sync your library, reading progress "
                                 "and statistics with your BookOrbit server.");
     button(y + 30, "Choose network", true);
+    touch::press(kMargin, y + 30, gfx::W - 2 * kMargin, 60, InputManager::BTN_CONFIRM);
     drawHints(false, true, false);
   } else {
     char line[96];
@@ -2178,9 +2339,11 @@ static void drawSetup(bool full) {
     const String values[3] = {config.server, config.username, masked(config.password)};
     for (int i = 0; i < 3; i++) {
       valueRow(y, names[i], values[i], setupSel == i);
+      touch::target(kMargin, y, gfx::W - 2 * kMargin, 52, &setupSel, i);
       y += 58;
     }
     button(y + 14, "Sign in", setupSel == 3);
+    touch::target(kMargin, y + 14, gfx::W - 2 * kMargin, 60, &setupSel, 3);
     drawHints(true, true, false);
   }
   present(full);
@@ -2314,8 +2477,43 @@ static int keyboardMoves(bool t9) {
   return n;
 }
 
+// ---- Touch (X4 Pro) ---------------------------------------------------------------------------------------------
+
+// Presses a button as if on the device (Back also counts as clicked, for the screens that act on its release).
+static void pressButton(uint8_t b) {
+  if (pressCount[b] < 4) pressCount[b] = pressCount[b] + 1;
+  if (b == InputManager::BTN_BACK) backReleased = true;
+}
+
+// The gestures the button task queued: a tap on what the screen registered (on a book page: its left third turns back,
+// the right third forward, the middle opens the menu), swipes as Left/Right/Up/Down (a swipe to the left is the next
+// page), and the Home key as Back.
+static void pollTouch() {
+  touch::Event e;
+  while (touch::pop(e)) {
+    uint8_t b = touch::kNoButton;
+    switch (e.gesture) {
+      case touch::Gesture::Tap:
+        if (reader::isOpen() && readerMenu == RMenu::None) {
+          b = e.x < gfx::W / 3 ? InputManager::BTN_LEFT : e.x >= gfx::W * 2 / 3 ? InputManager::BTN_RIGHT : InputManager::BTN_CONFIRM;
+        } else {
+          touch::tap(e.x, e.y, b);
+        }
+        break;
+      case touch::Gesture::SwipeLeft: b = InputManager::BTN_RIGHT; break;
+      case touch::Gesture::SwipeRight: b = InputManager::BTN_LEFT; break;
+      case touch::Gesture::SwipeUp: b = InputManager::BTN_DOWN; break;
+      case touch::Gesture::SwipeDown: b = InputManager::BTN_UP; break;
+      case touch::Gesture::Home: b = InputManager::BTN_BACK; break;
+      case touch::Gesture::HomeLong: openLight(); break;
+    }
+    if (b != touch::kNoButton) pressButton(b);
+  }
+}
+
 void loop() {
   handleSerial();
+  pollTouch();
   if (anyCount || injected >= 0) {
     anyCount = 0;
     lastActivity = millis();
@@ -2327,6 +2525,11 @@ void loop() {
   const bool powerClicked = pressed(InputManager::BTN_POWER);  // consumed even while unarmed, so the waking press is dropped
   if ((powerArmed && powerClicked) || sleepPending) goToSleep();
 
+  if (lightOpen) {
+    lightLoop();
+    delay(10);
+    return;
+  }
   if (reader::isOpen()) {
     readerLoop();
     delay(10);
@@ -2478,24 +2681,27 @@ void loop() {
       screen = Screen::Home;
       showList(false);
     } else if (pressed(InputManager::BTN_DOWN)) {
-      settingsSel = (settingsSel + 1) % 8;
+      settingsSel = (settingsSel + 1) % settingsCount();
       showList(false);
     } else if (pressed(InputManager::BTN_UP)) {
-      settingsSel = (settingsSel + 7) % 8;
+      settingsSel = (settingsSel + settingsCount() - 1) % settingsCount();
       showList(false);
     } else if (pressed(InputManager::BTN_CONFIRM)) {
-      if (settingsSel == 0) {
+      const SettingRow row = settingsRow(settingsSel);
+      if (row == SetNetwork) {
         openNetworks();
-      } else if (settingsSel == 1) {
+      } else if (row == SetServer) {
         openKeyboard(KbServer, config.server.isEmpty() ? String("http://") : config.server);
-      } else if (settingsSel == 2) {
+      } else if (row == SetUsername) {
         openKeyboard(KbUsername, config.username);
-      } else if (settingsSel == 3) {
+      } else if (row == SetPassword) {
         openKeyboard(KbPassword, config.password);
-      } else if (settingsSel == 7) {
+      } else if (row == SetUpdate) {
         firmwareUpdate();
+      } else if (row == SetLight) {
+        openLight();
       } else {
-        openPicker(settingsSel == 4 ? 2 : settingsSel == 5 ? 0 : 1);
+        openPicker(row == SetKeyboard ? 2 : row == SetCompanion ? 0 : 1);
         showList(false);
       }
     }

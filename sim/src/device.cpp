@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <BatteryMonitor.h>
 #include <EInkDisplay.h>
+#include <FrontlightManager.h>
 #include <InputManager.h>
 #include <PowerManager.h>
 #include <SDCardManager.h>
@@ -243,7 +244,15 @@ void freeink::FreeInkDisplay::waitRefreshComplete() {
 }
 
 void InputManager::update() {
-  const uint32_t now = sim::shared().buttons;
+  sim::Shared& s = sim::shared();
+  event_ = 0;
+  if (s.touchTail != s.touchHead) {
+    const sim::TouchRecord& r = s.touch[s.touchTail % sim::kTouchRing];
+    event_ = r.kind == sim::TouchRecord::Tap ? 1 : r.kind == sim::TouchRecord::Swipe ? 2 : r.kind == sim::TouchRecord::HomeTap ? 3 : 4;
+    ev_[0] = r.nx0, ev_[1] = r.ny0, ev_[2] = r.nx1, ev_[3] = r.ny1;
+    __atomic_add_fetch(&s.touchTail, 1, __ATOMIC_RELEASE);
+  }
+  const uint32_t now = s.buttons;
   pressed_ = now & ~current_;
   released_ = current_ & ~now;
   if (pressed_) pressStart_ = millis();
@@ -251,6 +260,30 @@ void InputManager::update() {
 }
 bool InputManager::isPowerButtonPhysicallyPressed() const { return sim::shared().buttons & (1u << BTN_POWER); }
 unsigned long InputManager::getHeldTime() const { return current_ ? millis() - pressStart_ : 0; }
+bool InputManager::hasTouch() const { return sim::shared().x4pro; }
+bool InputManager::wasTouchTap(float& nx, float& ny) const {
+  if (event_ != 1) return false;
+  nx = ev_[0], ny = ev_[1];
+  return true;
+}
+bool InputManager::wasSwipe(float& nxStart, float& nyStart, float& nxEnd, float& nyEnd) const {
+  if (event_ != 2) return false;
+  nxStart = ev_[0], nyStart = ev_[1], nxEnd = ev_[2], nyEnd = ev_[3];
+  return true;
+}
+
+// ---- Frontlight (X4 Pro mode): the level goes to the window, which tints the paper
+
+bool FrontlightManager::present() const { return sim::shared().x4pro; }
+void FrontlightManager::setBrightness(uint8_t percent) {
+  level_ = percent;
+  sim::shared().lightLevel = percent;
+}
+void FrontlightManager::setColorTemperature(uint8_t warmPercent) {
+  warm_ = warmPercent;
+  sim::shared().lightWarm = warmPercent;
+}
+void FrontlightManager::prepareForDeepSleep() { sim::shared().lightLevel = 0; }
 
 // ---- Wi-Fi
 

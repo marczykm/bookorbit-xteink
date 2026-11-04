@@ -18,6 +18,7 @@ sudo apt install libsdl2-dev libcurl4-openssl-dev   # Debian/Ubuntu
 pio run -e simulator
 .pio/build/simulator/program            # Xteink X4 (480x800)
 .pio/build/simulator/program --x3       # Xteink X3 (528x792)
+.pio/build/simulator/program --x4pro    # Xteink X4 Pro (480x800, touchscreen and frontlight)
 ```
 
 Options:
@@ -25,6 +26,7 @@ Options:
 | Option | Meaning |
 | --- | --- |
 | `--x3` | Xteink X3 panel (default: X4) |
+| `--x4pro` | Xteink X4 Pro: touch, Home key, frontlight, only the two side keys |
 | `--no-demo` | don't start the demo server; the SD card is then `sim/sdcard` (e.g. set up for your own server) |
 | `--sd DIR` | folder used as the SD card (default: `sim/sdcard-demo`, or `sim/sdcard` with `--no-demo`) |
 | `--slow` | wait as long as the real panel takes to refresh |
@@ -38,6 +40,11 @@ Options:
 | Enter or Space | OK |
 | arrows | Left, Right, Up, Down |
 | P | Power (hold for a long press; wakes from sleep) |
+
+**X4 Pro** (`--x4pro`): the mouse is the touchscreen (a click is a tap, a drag a swipe), **H** is the Home key (hold it
+for the light panel), the **Up/Down** arrows are the two side keys and **P** is Power; the other device keys are off, as the
+X4 Pro has none. The paper is a little darker with the light off and is tinted by the frontlight (cool to warm); the
+window title shows its level.
 
 Simulator controls: **R** resets the device, **S** saves a screenshot to `sim/screenshots`, **W** takes Wi-Fi away (to test
 the offline paths), **F** turns the panel refresh times on and off, **+** and **-** change the battery level. The window

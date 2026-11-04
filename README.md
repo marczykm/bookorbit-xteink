@@ -1,12 +1,14 @@
 # bookorbit-xteink
 
-Custom firmware for the Xteink X4 that reads books from a self-hosted BookOrbit server
+Custom firmware for the Xteink X4, X3 and X4 Pro that reads books from a self-hosted BookOrbit server
 (companion to `../bookorbit-android`). Built on the [FreeInk SDK](freeink-sdk/) (MIT, vendored from the
 CrossPoint reader repo, commit 2ec01c9): display driver, input, battery, SD, EPUB engine.
 
 ## Status
 - Library browser: Wi-Fi, sign-in, paged book list, download to `/BookOrbit/` (`http://` or `https://`).
 - EPUB reader: FreeInkBook layout cached on the SD card (`/BookOrbit/.cache/`), page turns, resume position, images.
+- Xteink X4 Pro (ESP32-S3, built and tested in the simulator only so far): its own image, `bookorbit-x4pro-<version>.bin` (env `xteink_x4pro`, stock X4 Pro partition table in `partitions_x4pro.csv`). The device has two side keys (Up/Down), Power, a touchscreen and a capacitive Home key, so the app works by touch: every screen registers what it draws as tap targets (`src/touch.cpp`), a tap selects the row, key or menu item and presses OK, the icons in the bottom bar are buttons, a swipe left/right is Right/Left (next/previous page, flipping Reading now) and up/down is Down/Up. On a book page the left third turns back, the right third forward and the middle opens the menu. The Home key is Back; holding it opens the light panel.
+- Frontlight (X4 Pro, `src/light.cpp`): brightness and warmth in steps of 10% in a small panel (hold the Home key, in the library or while reading, or Settings > Light), tap - and + or use the side keys; saved in `/BookOrbit/.light`, restored at boot and turned off for sleep. The serial test hooks `TAP:x,y`, `SWIPE:L|R|U|D`, `HOME` and `HOMELONG` inject touch.
 - Library submenu: Home > Library opens All / Authors / Series / Smart scopes. All is the paged book list; the others list authors, series or the user's saved filters (page with Left/Right), and OK shows that entry's books. Back goes up one level. Lists are cached on the SD card for offline browsing.
 - Reader page: a header with the chapter's name and the battery, and a footer with a progress axis (a line for the book, a tick at the start of each chapter, a dot at the current position) with a rough time to the end of the chapter on its right (~1200 characters a minute).
 - Reader menu: OK while reading opens a menu with Contents, Text size and Margins. Contents lists the book's table of contents (current entry starred); OK jumps to the start of that chapter. Text size offers 18-30 px (default 22) and re-lays out the chapter at the same place in the text; it is saved in `/BookOrbit/.fontsize` for all books and each size keeps its own page cache. Margins offers narrow/normal/wide/wider side margins (8/20/32/48 px; `/BookOrbit/.margin`), also kept for all books. Back goes up a level, then closes the menu.
@@ -55,7 +57,9 @@ Settings live in `/bookorbit.json` on the SD card (see `config.example.json`). T
 
 Erasing `otadata` makes the device start from the first app slot (the firmware before may have run from the second); nothing else is touched, so the NVS partition with the device's factory data stays. Put `config.json` on the card as `/bookorbit.json`, or let the first-run setup write it. **Updating from the device:** Settings > Update checks the latest GitHub release and, on OK, downloads its `bookorbit-x3-x4-<version>.bin` into the spare app slot and restarts into it.
 
-**Releasing:** set `FW_VERSION` in `platformio.ini`, commit, then `tools/release.sh` builds the images and publishes the `v<version>` release with `bookorbit-x3-x4-<version>.bin` (plus copies named for the update check of firmware 0.0.4-0.0.5).
+**Xteink X4 Pro:** the same, with its image and chip: `esptool --chip esp32s3 erase-region 0xe000 0x2000`, then `esptool --chip esp32s3 write-flash 0x10000 bookorbit-x4pro-<version>.bin`. Settings > Update fetches `bookorbit-x4pro-<version>.bin`.
+
+**Releasing:** set `FW_VERSION` in `platformio.ini`, commit, then `tools/release.sh` builds the images and publishes the `v<version>` release with `bookorbit-x3-x4-<version>.bin`, `bookorbit-x4pro-<version>.bin` (plus copies named for the update check of firmware 0.0.4-0.0.5).
 
 Flash layout is in `partitions.csv`: the stock Xteink table (two 6.25 MB app slots for updates). The font pack is built from `fonts/*.ttf` before each build (`tools/pio_fontpack.py`) and embedded in the app.
 
@@ -69,7 +73,7 @@ Environment `xteink_x4c` is for the ESP32-S3 X4 Classic (untested).
 
 ## Testing without touching the device
 The desktop simulator (SDL2 window, macOS/Linux) runs the same firmware without a device: `pio run -e simulator` and
-`.pio/build/simulator/program [--x3]`. See [sim/README.md](sim/README.md).
+`.pio/build/simulator/program [--x3 | --x4pro]`. See [sim/README.md](sim/README.md).
 
 `tools/drive.py PORT OUTDIR STEP...` resets the device, injects button presses over serial (`o` OK, `d`/`u` down/up,
 `n`/`p` next/previous page, `b` back) and saves screenshots (`shot`) as PNG. `OPEN:/path.epub` opens any EPUB on the card.

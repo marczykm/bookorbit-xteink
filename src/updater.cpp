@@ -10,7 +10,11 @@
 #define FW_VERSION "dev"
 #endif
 #ifndef UPDATE_ASSET
+#if FREEINK_DEVICE_X4PRO
+#define UPDATE_ASSET "bookorbit-x4pro-"  // the X4 Pro (ESP32-S3) image: bookorbit-x4pro-<version>.bin
+#else
 #define UPDATE_ASSET "bookorbit-x3-x4-"  // one image for both C3 devices: bookorbit-x3-x4-<version>.bin
+#endif
 #endif
 #ifndef UPDATE_API
 #define UPDATE_API "https://api.github.com/repos/marczykm/bookorbit-xteink/releases/latest"

@@ -2,13 +2,15 @@
 // process (started again on ESP.restart() and on waking from deep sleep, so each run starts from a clean state like the
 // device; RTC_NOINIT_ATTR variables are carried over).
 //
-//   .pio/build/simulator/program [--x3] [--sd DIR] [--slow] [--scale N] [--no-demo]
+//   .pio/build/simulator/program [--x3 | --x4pro] [--sd DIR] [--slow] [--scale N] [--no-demo]
 //
 // Unless --no-demo is given it also runs sim/demo_server.py (a stand-in BookOrbit server on port 3000, login demo/demo),
 // with its own SD card folder (sim/sdcard-demo) set up to use it. --no-demo uses sim/sdcard, e.g. for your own server.
 //
 // Keys: Esc/Backspace = Back, Enter = OK, arrows = Left/Right/Up/Down, P = Power (hold for a long press),
 //       R = reset, S = screenshot, W = Wi-Fi out of reach, F = panel refresh times on/off, +/- = battery.
+// X4 Pro (--x4pro): the mouse is the touchscreen (click = tap, drag = swipe), H the Home key (hold for a long press),
+//       Up/Down the two side keys; the paper is tinted by the frontlight.
 #include <SDL.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -63,6 +65,7 @@ std::string openPty() {
 void start(int reason) {
   shm->resetReason = reason;
   shm->buttons = 0;
+  shm->touchTail = shm->touchHead;  // gestures meant for the previous run are dropped
   std::vector<std::string> args = {self, "--firmware", std::to_string(shmFd), std::to_string(ptyFd)};
   std::vector<char*> argv;
   for (auto& a : args) argv.push_back(&a[0]);
@@ -112,8 +115,12 @@ void stopDemo() {
 }
 
 void title(SDL_Window* w) {
-  std::string t = std::string("BookOrbit simulator - ") + (shm->x3 ? "X3" : "X4");
+  std::string t = std::string("BookOrbit simulator - ") + (shm->x3 ? "X3" : shm->x4pro ? "X4 Pro" : "X4");
   t += "  battery " + std::to_string(shm->battery) + "%";
+  if (shm->x4pro) {
+    t += shm->lightLevel ? "  light " + std::to_string(shm->lightLevel) + "%, warm " + std::to_string(shm->lightWarm) + "%"
+                         : std::string("  light off");
+  }
   if (shm->wifiDown) t += "  [no Wi-Fi]";
   if (shm->slow) t += "  [slow panel]";
   if (sleeping) t += "  - asleep, P wakes";
@@ -121,18 +128,30 @@ void title(SDL_Window* w) {
   SDL_SetWindowTitle(w, t.c_str());
 }
 
+// The paper colour: on the X4 Pro a little darker with the light off, and lit cool white to warm amber by the frontlight.
+uint32_t paperColor() {
+  if (!shm->x4pro) return kPaper;
+  const float level = shm->lightLevel / 100.0f, warm = shm->lightWarm / 100.0f;
+  const float off[3] = {214, 210, 200};
+  const float lit[3] = {244 + 11 * warm, 248 - 18 * warm, 255 - 70 * warm};
+  uint32_t c = 0xFF000000;
+  for (int i = 0; i < 3; i++) c |= (uint32_t)(off[i] + (lit[i] - off[i]) * level) << (16 - 8 * i);
+  return c;
+}
+
 // The landscape panel buffer turned to portrait, the way gfx draws it (portrait x = panel height - 1 - row, y = column).
 void render(SDL_Texture* tex, int pw, int ph) {
   void* pixels;
   int pitch;
   if (SDL_LockTexture(tex, nullptr, &pixels, &pitch)) return;
+  const uint32_t paper = paperColor();
   const int fw = shm->fbWidth, fh = shm->fbHeight, stride = shm->fbStride;
   for (int y = 0; y < ph; y++) {
     uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
     for (int x = 0; x < pw; x++) {
       const int px = y, py = fh - 1 - x;
       const bool white = px < fw && py >= 0 && (shm->fb[py * stride + px / 8] & (0x80 >> (px & 7)));
-      row[x] = white ? kPaper : kInk;
+      row[x] = white ? paper : kInk;
     }
   }
   SDL_UnlockTexture(tex);
@@ -157,7 +176,21 @@ void screenshot(int pw, int ph) {
   printf("[sim] screenshot: %s\n", name);
 }
 
+// A gesture for the firmware, in the panel's native frame (portrait x runs against the panel's y, portrait y along its x).
+void sendTouch(sim::TouchRecord::Kind kind, int x0 = 0, int y0 = 0, int x1 = 0, int y1 = 0) {
+  const int pw = shm->fbHeight, ph = shm->fbWidth;
+  sim::TouchRecord r{kind, (float)y0 / ph, 1.0f - (float)x0 / pw, (float)y1 / ph, 1.0f - (float)x1 / pw};
+  if (shm->touchHead - shm->touchTail >= (uint32_t)sim::kTouchRing) return;  // the firmware is not reading: drop it
+  shm->touch[shm->touchHead % sim::kTouchRing] = r;
+  __atomic_add_fetch(&shm->touchHead, 1, __ATOMIC_RELEASE);
+}
+
 int buttonFor(SDL_Keycode k) {
+  if (shm->x4pro) {  // only the two side keys and Power
+    if (k == SDLK_UP) return 4;
+    if (k == SDLK_DOWN) return 5;
+    return k == SDLK_p ? 6 : -1;
+  }
   switch (k) {
     case SDLK_ESCAPE: case SDLK_BACKSPACE: return 0;  // Back
     case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: return 1;  // OK
@@ -175,16 +208,17 @@ int main(int argc, char** argv) {
   if (argc == 4 && !strcmp(argv[1], "--firmware")) return sim::runFirmware(atoi(argv[2]), atoi(argv[3]));
 
   self = argv[0];
-  bool x3 = false, slow = false, withDemo = true;
+  bool x3 = false, x4pro = false, slow = false, withDemo = true;
   int scale = 1;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--x3")) x3 = true;
+    else if (!strcmp(argv[i], "--x4pro")) x4pro = true;
     else if (!strcmp(argv[i], "--slow")) slow = true;
     else if (!strcmp(argv[i], "--no-demo")) withDemo = false;
     else if (!strcmp(argv[i], "--sd") && i + 1 < argc) setenv("SIM_SD", argv[++i], 1);
     else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = std::max(1, atoi(argv[++i]));
     else {
-      fprintf(stderr, "usage: %s [--x3] [--sd DIR] [--slow] [--scale N] [--no-demo]\n", argv[0]);
+      fprintf(stderr, "usage: %s [--x3 | --x4pro] [--sd DIR] [--slow] [--scale N] [--no-demo]\n", argv[0]);
       return 2;
     }
   }
@@ -194,7 +228,8 @@ int main(int argc, char** argv) {
   unlink(path);
   if (shmFd < 0 || ftruncate(shmFd, sizeof(sim::Shared))) return perror("shared memory"), 1;
   shm = (sim::Shared*)mmap(nullptr, sizeof(sim::Shared), PROT_READ | PROT_WRITE, MAP_SHARED, shmFd, 0);
-  shm->x3 = x3;
+  shm->x3 = x3 && !x4pro;
+  shm->x4pro = x4pro;
   shm->slow = slow;
   shm->battery = 87;
   shm->fbWidth = x3 ? 792 : 800;
@@ -208,9 +243,11 @@ int main(int argc, char** argv) {
     startDemo(seed);
   }
   const std::string pty = openPty();
-  printf("[sim] %s, SD card: %s\n", x3 ? "Xteink X3" : "Xteink X4", getenv("SIM_SD") ? getenv("SIM_SD") : SIM_DIR "/sdcard");
+  printf("[sim] %s, SD card: %s\n", shm->x3 ? "Xteink X3" : x4pro ? "Xteink X4 Pro" : "Xteink X4", getenv("SIM_SD") ? getenv("SIM_SD") : SIM_DIR "/sdcard");
   if (!pty.empty()) printf("[sim] serial port: %s  (e.g. python tools/drive.py %s OUTDIR ...)\n", pty.c_str(), pty.c_str());
-  printf("[sim] keys: Esc/Backspace Back, Enter OK, arrows, P Power, R reset, S screenshot, W Wi-Fi, F slow panel, +/- battery\n");
+  if (x4pro) printf("[sim] touch: click = tap, drag = swipe; H Home (hold: light), Up/Down side keys, P Power\n");
+  else printf("[sim] keys: Esc/Backspace Back, Enter OK, arrows, P Power\n");
+  printf("[sim] R reset, S screenshot, W Wi-Fi, F slow panel, +/- battery\n");
   fflush(stdout);
 
   if (SDL_Init(SDL_INIT_VIDEO)) return fprintf(stderr, "SDL: %s\n", SDL_GetError()), 1;
@@ -225,6 +262,10 @@ int main(int argc, char** argv) {
   title(win);
   uint32_t shownSeq = ~0u;
   bool dirty = true;
+  int downX = -1, downY = -1;        // where the mouse button went down (X4 Pro touch)
+  uint32_t homeDownAt = 0;           // when H went down; 0 = not held
+  bool homeLongSent = false;
+  int shownLight = -1, shownWarm = -1;
   for (;;) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -256,6 +297,34 @@ int main(int argc, char** argv) {
         }
       }
       if (e.type == SDL_WINDOWEVENT) dirty = true;
+      if (shm->x4pro && e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+        downX = e.button.x;
+        downY = e.button.y;
+      }
+      if (shm->x4pro && e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT && downX >= 0) {
+        const int dx = e.button.x - downX, dy = e.button.y - downY;
+        if (dx * dx + dy * dy > 30 * 30) sendTouch(sim::TouchRecord::Swipe, downX, downY, e.button.x, e.button.y);
+        else sendTouch(sim::TouchRecord::Tap, downX, downY);
+        downX = -1;
+      }
+      if (shm->x4pro && e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.sym == SDLK_h) {
+        homeDownAt = SDL_GetTicks() | 1;
+        homeLongSent = false;
+      }
+      if (shm->x4pro && e.type == SDL_KEYUP && e.key.keysym.sym == SDLK_h && homeDownAt) {
+        if (!homeLongSent) sendTouch(sim::TouchRecord::HomeTap);
+        homeDownAt = 0;
+      }
+    }
+    if (homeDownAt && !homeLongSent && SDL_GetTicks() - homeDownAt >= 700) {  // the Home key's long press, while held
+      sendTouch(sim::TouchRecord::HomeLong);
+      homeLongSent = true;
+    }
+    if (shm->x4pro && (shm->lightLevel != shownLight || shm->lightWarm != shownWarm)) {
+      shownLight = shm->lightLevel;
+      shownWarm = shm->lightWarm;
+      dirty = true;
+      title(win);
     }
 
     int status;
