@@ -5,7 +5,6 @@
 #include <FreeInkBook.h>
 #include <FreeInkUIBookFont.h>
 #include <SDCardManager.h>
-#include <esp_partition.h>
 #include <cache/PageCache.h>
 #include <css/Css.h>
 #include <layout/ChapterLayout.h>
@@ -29,7 +28,7 @@ constexpr size_t kScratchArena = 96 * 1024;  // layout + page render working mem
 constexpr size_t kIndexArena = 4 * 1024;     // page index of the open chapter
 constexpr size_t kSheetArena = 6 * 1024;     // book CSS
 constexpr uint32_t kFontFingerprintBitmap = 0xB00C0001;  // built-in ASCII font
-constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the flash `fonts` partition; bump when it changes
+constexpr uint32_t kFontFingerprintTtf = 0xB00C0002;     // Noto Serif from the built-in font pack; bump when it changes
 // Glyph caches: regular, bold, italic. The glyphs are kept at 4 bits; the regular face has 256 slots (a page with its header and
 // footer uses ~110 regular glyphs), the others the default 64.
 constexpr size_t kFaceArena[3] = {18 * 1024, 6 * 1024, 6 * 1024};
@@ -122,8 +121,7 @@ struct State {
   uint8_t* faceBuf[3] = {nullptr, nullptr, nullptr};
   Arena faceArena[3];
   TtfFont faces[3];
-  esp_partition_mmap_handle_t mapHandle = 0;
-  bool mapped = false, ttf = false;
+  bool ttf = false;
   FontChain fonts;
   LayoutParams params;
   uint32_t generation = 0;
@@ -143,7 +141,6 @@ void freeBuffers() {
   free(st->indexBuf);
   free(st->sheetBuf);
   for (uint8_t* b : st->faceBuf) free(b);
-  if (st->mapped) esp_partition_munmap(st->mapHandle);
   delete st;
   st = nullptr;
 }
@@ -209,15 +206,11 @@ bool openChapter(int index, String& error) {
   return true;
 }
 
-// Maps the font pack from the `fonts` flash partition and registers its faces; false leaves the chain empty.
+// Registers the faces of the built-in font pack; false leaves the chain empty.
 bool loadFonts(State& s) {
-  const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "fonts");
-  if (!part) { Serial.println("fonts: no `fonts` partition"); return false; }
-  const void* mem = nullptr;
-  if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mem, &s.mapHandle) != ESP_OK) { Serial.println("fonts: mmap failed"); return false; }
-  s.mapped = true;
-  const uint8_t* pack = static_cast<const uint8_t*>(mem);
-  if (memcmp(pack, "FPK1", 4) != 0) { Serial.println("fonts: bad pack header"); return false; }
+  size_t packSize = 0;
+  const uint8_t* pack = gfx::fontPack(packSize);
+  if (!pack) { Serial.println("fonts: no font pack"); return false; }
   uint32_t count;
   memcpy(&count, pack + 4, 4);
   if (count > 4) return false;
@@ -227,7 +220,7 @@ bool loadFonts(State& s) {
     memcpy(&style, pack + 8 + 12 * i, 4);
     memcpy(&offset, pack + 12 + 12 * i, 4);
     memcpy(&length, pack + 16 + 12 * i, 4);
-    if (style > 2 || offset + length > part->size) continue;  // bold-italic has no cache budget; the chain falls back
+    if (style > 2 || offset + length > packSize) continue;  // bold-italic has no cache budget; the chain falls back
     if (!s.faceBuf[style]) { Serial.printf("fonts: no heap for face %u\n", (unsigned)style); return false; }
     s.faceArena[style].init(s.faceBuf[style], kFaceArena[style]);
     s.faces[style].setPackedGlyphs(true);

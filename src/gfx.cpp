@@ -4,7 +4,6 @@
 #include <math.h>
 #include <new>
 #include <FreeInkUIFont.h>
-#include <esp_partition.h>
 #include <render/TtfFont.h>
 
 namespace gfx {
@@ -12,7 +11,7 @@ namespace {
 EInkDisplay* disp = nullptr;
 const freeink::ui::BitmapFont& font = freeink::ui::kNotoSansFont;
 
-// Optional Noto Serif from the flash `fonts` partition; it has the Polish letters the bitmap font lacks.
+// Noto Serif from the font pack built into the firmware; it has the Polish letters the bitmap font lacks.
 constexpr uint16_t kTtfSize = 22;
 constexpr size_t kTtfArena = 8 * 1024;  // the font's tables and the glyph being rasterized; drawn glyphs live in the 1-bit cache below
 freeink::book::TtfFont ttf;
@@ -160,14 +159,20 @@ void begin(EInkDisplay* display) {
   H = display->getDisplayWidth();
 }
 
+// Embedded by board_build.embed_files (platformio.ini); it stays in flash, read in place.
+extern const uint8_t fontpack_start[] asm("_binary_build_fontpack_bin_start");
+extern const uint8_t fontpack_end[] asm("_binary_build_fontpack_bin_end");
+
+const uint8_t* fontPack(size_t& size) {
+  size = fontpack_end - fontpack_start;
+  return size >= 8 && memcmp(fontpack_start, "FPK1", 4) == 0 ? fontpack_start : nullptr;
+}
+
 bool loadUiFont() {
   if (ttfOnOwn) return true;  // already loaded
-  const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "fonts");
-  if (!part) return false;
-  const void* mem = nullptr;
-  esp_partition_mmap_handle_t handle;
-  if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mem, &handle) != ESP_OK) { Serial.println("ui font: mmap failed"); return false; }
-  const uint8_t* pack = static_cast<const uint8_t*>(mem);
+  size_t packSize = 0;
+  const uint8_t* pack = fontPack(packSize);
+  if (!pack) { Serial.println("ui font: no font pack"); return false; }
   uint32_t count;
   memcpy(&count, pack + 4, 4);
   if (memcmp(pack, "FPK1", 4) != 0 || count == 0) return false;
@@ -175,7 +180,7 @@ bool loadUiFont() {
   memcpy(&style, pack + 8, 4);
   memcpy(&offset, pack + 12, 4);
   memcpy(&length, pack + 16, 4);
-  uint8_t* buf = style == 0 && offset + length <= part->size ? static_cast<uint8_t*>(malloc(kTtfArena)) : nullptr;
+  uint8_t* buf = style == 0 && offset + length <= packSize ? static_cast<uint8_t*>(malloc(kTtfArena)) : nullptr;
   if (!buf) { Serial.printf("ui font: no heap for %u bytes (free %u, largest %u)\n", (unsigned)kTtfArena, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap()); return false; }
   ttfArena.init(buf, kTtfArena);
   if (!ttf.init(pack + offset, length, ttfArena)) { Serial.println("ui font: init failed"); return false; }

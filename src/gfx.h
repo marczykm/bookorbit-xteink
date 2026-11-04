@@ -13,6 +13,8 @@ extern int H;
 void begin(EInkDisplay* display);
 // Switches text to Noto Serif from the flash font pack (Polish letters); keeps the ASCII bitmap font on failure.
 bool loadUiFont();
+// The Noto Serif font pack built into the firmware ("FPK1" header, see tools/make_fontpack.py) and its size in bytes.
+const uint8_t* fontPack(size_t& size);
 // Lends the reader's text face to the UI text functions (so Polish titles work without loading a second font); nullptr gives it back.
 void lendFace(freeink::font::TtfFont* face);
 // A small centered notice box (rounded frame, title and one line of text) drawn over the current screen and refreshed quickly.

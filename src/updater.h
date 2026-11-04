@@ -1,5 +1,6 @@
 #pragma once
-// Firmware update from the project's GitHub releases (the "-ota.bin" asset of the latest release).
+// Firmware update from the project's GitHub releases: the app image of the latest release (bookorbit-x3-x4-<version>.bin,
+// the same file that installs it over USB).
 #include <Arduino.h>
 
 namespace updater {
@@ -10,8 +11,6 @@ struct Info {
 };
 
 const char* currentVersion();
-// The device the update image is picked for: "x4" (default) or "x3". The images are named bookorbit-<device>-<version>-ota.bin.
-void setDevice(const char* name);
 // Asks GitHub for the latest release: 1 = a newer one is in `info`, 0 = this firmware is current, -1 = error.
 int check(Info& info, String& error);
 // Downloads the image into the spare app slot and makes it the next boot; `progress` gets 0-100. The caller restarts.

@@ -9,6 +9,9 @@
 #ifndef FW_VERSION
 #define FW_VERSION "dev"
 #endif
+#ifndef UPDATE_ASSET
+#define UPDATE_ASSET "bookorbit-x3-x4-"  // one image for both C3 devices: bookorbit-x3-x4-<version>.bin
+#endif
 #ifndef UPDATE_API
 #define UPDATE_API "https://api.github.com/repos/marczykm/bookorbit-xteink/releases/latest"
 #endif
@@ -62,10 +65,6 @@ long versionNumber(const char* v) {
 
 const char* currentVersion() { return FW_VERSION; }
 
-namespace {
-String assetPrefix = "bookorbit-x4-";  // the asset name starts with this and ends with "-ota.bin"
-}
-void setDevice(const char* name) { assetPrefix = String("bookorbit-") + name + "-"; }
 
 int check(Info& info, String& error) {
   HTTPClient http;
@@ -93,7 +92,7 @@ int check(Info& info, String& error) {
   const char* tag = doc["tag_name"] | "";
   for (JsonObject a : doc["assets"].as<JsonArray>()) {
     String name = a["name"] | "";
-    if (!name.startsWith(assetPrefix) || !name.endsWith("-ota.bin")) continue;
+    if (!name.startsWith(UPDATE_ASSET) || !name.endsWith(".bin")) continue;
     const char* v = tag[0] == 'v' ? tag + 1 : tag;
     strlcpy(info.version, v, sizeof(info.version));
     strlcpy(info.url, a["browser_download_url"] | "", sizeof(info.url));
