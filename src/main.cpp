@@ -1906,37 +1906,36 @@ static void drawSleepScreen() {
   const bool book = stats.readingNow && stats.nowId;
   if (book) gfx::loadUiFont();
   const int coverW = cover::BigW, coverH = cover::BigH;  // the large cover is drawn 1:1
-  constexpr int kTitleSize = 28, kTitleStep = 34, kAuthorSize = 22;
-  char t1[100] = "", t2[100] = "";
-  const int titleLines = book ? wrapBig(stats.nowTitle, gfx::W - 40, kTitleSize, t1, t2) : 0;
-  const bool author = book && stats.nowAuthor[0];
-  const int info = coverH + 18 + titleLines * kTitleStep + (author ? 30 : 0) + 18 + 14 + 10 + 34;  // cover down to the percentage
-  // The companion asleep, enlarged: two times over the cover's top right corner when there is a book, three times (centered) alone.
+  constexpr int kTitleSize = 26, kTitleStep = 30, kAuthorSize = 22, kAuthorStep = 28, kBarRow = 26;
+  // With a book: the companion (two times) sits left of the title, author and progress under the cover. Alone it is three times, centered.
   const int kScale = book ? 2 : 3, kSize = 64 * kScale;
-  const int y0 = book ? (gfx::H - info) / 2 + 24 : 0;  // the book block, a little low so the companion fits above its corner
-  const int cx = (gfx::W - coverW) / 2;
-  const int petX = book ? cx + coverW - 90 : (gfx::W - kSize) / 2;
-  const int petY = book ? y0 - 56 : (gfx::H - kSize) / 2 - 24;  // alone it sits a little high (sprites sit low in their square)
+  const int textX = 20 + kSize + 16, textW = gfx::W - 20 - textX;  // the column to the right of the companion
+  char t1[100] = "", t2[100] = "";
+  const int titleLines = book ? wrapBig(stats.nowTitle, textW, kTitleSize, t1, t2) : 0;
+  const bool author = book && stats.nowAuthor[0];
+  const int textH = titleLines * kTitleStep + (author ? kAuthorStep : 0) + 10 + kBarRow;
+  const int rowH = kSize;  // the companion is taller than the text, so the row is its height
+  const int y0 = book ? (gfx::H - (coverH + 22 + rowH)) / 2 : 0;
+  const int cx = (gfx::W - coverW) / 2, rowY = y0 + coverH + 22;
+  const int petX = book ? 20 : (gfx::W - kSize) / 2;
+  const int petY = book ? rowY : (gfx::H - kSize) / 2 - 24;  // alone it sits a little high (sprites sit low in their square)
   const uint8_t* sprite = pets::kSprites[petIndex][pets::Sleep];
-  auto drawPetSprite = [&]() {
-    if (book) {  // a white halo, so it stands out over the cover
-      for (int y = 0; y < 64; y++)
-        for (int x = 0; x < 64; x++)
-          if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale - 4, petY + y * kScale - 4, kScale + 8, kScale + 8, false);
-    }
-    for (int y = 0; y < 64; y++)
-      for (int x = 0; x < 64; x++)
-        if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, petY + y * kScale, kScale, kScale, true);
-  };
+  for (int y = 0; y < 64; y++)
+    for (int x = 0; x < 64; x++)
+      if (sprite[y * 8 + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(petX + x * kScale, petY + y * kScale, kScale, kScale, true);
   if (book) {
     float pct = stats.nowProgress;
     if (sleepLivePct >= 0 && sleepLiveFile && sleepLiveFile == stats.nowFileId) pct = max(pct, sleepLivePct);  // the book just read
     const int cy = y0;
     gfx::fillRect(cx - 4, cy - 4, coverW + 8, coverH + 8, true);  // a frame around the cover
     gfx::fillRect(cx - 2, cy - 2, coverW + 4, coverH + 4, false);
-    uint8_t* bits = (uint8_t*)malloc(cover::kBigBytes);
-    if (bits && cover::loadBig(stats.nowId, bits)) {
-      gfx::blit1bit(cx, cy, bits, coverW, coverH);
+    if (cover::hasBig(stats.nowId)) {  // drawn in strips, so no big buffer is needed
+      constexpr int kStrip = 24;
+      uint8_t strip[kStrip * (cover::BigW / 8)];
+      for (int row = 0; row < coverH; row += kStrip) {
+        const int n = min(kStrip, coverH - row);
+        if (cover::loadBigRows(stats.nowId, row, n, strip)) gfx::blit1bit(cx, cy + row, strip, coverW, n);
+      }
     } else {  // no large cover yet: the small one, enlarged
       uint8_t small[cover::kBytes];
       if (cover::load(stats.nowId, small)) {
@@ -1946,26 +1945,23 @@ static void drawSleepScreen() {
             if (small[y * (cover::W / 8) + x / 8] & (0x80 >> (x & 7))) gfx::fillRect(cx + x * k, cy + y * k, k, k, true);
       }
     }
-    free(bits);
-    drawPetSprite();
-    int ty = cy + coverH + 18;
-    gfx::bigTextCentered(ty, t1, kTitleSize);
-    if (titleLines == 2) gfx::bigTextCentered(ty + kTitleStep, t2, kTitleSize);
+    int ty = rowY + (rowH - textH) / 2;  // the text block, centered against the companion
+    gfx::bigText(textX, ty, t1, kTitleSize);
+    if (titleLines == 2) gfx::bigText(textX, ty + kTitleStep, t2, kTitleSize);
     ty += titleLines * kTitleStep;
     if (author) {
       char a1[100];
       strlcpy(a1, stats.nowAuthor, sizeof(a1));
-      fitBig(a1, gfx::W - 40, kAuthorSize);
-      gfx::bigTextCentered(ty, a1, kAuthorSize);
-      ty += 30;
+      fitBig(a1, textW, kAuthorSize);
+      gfx::bigText(textX, ty, a1, kAuthorSize);
+      ty += kAuthorStep;
     }
-    ty += 18;
-    bar((gfx::W - 260) / 2, ty, 260, 14, pct / 100.0f);
+    ty += 10;
     char buf[16];
     snprintf(buf, sizeof(buf), "%d%%", (int)pct);
-    gfx::bigTextCentered(ty + 14 + 10, buf, 32);
-  } else {
-    drawPetSprite();
+    const int pctW = gfx::bigTextWidth(buf, 26);
+    bar(textX, ty, textW - pctW - 12, 14, pct / 100.0f);
+    gfx::bigText(textX + textW - pctW, ty - 6, buf, 26);
   }
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }

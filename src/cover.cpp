@@ -252,6 +252,17 @@ bool loadBig(long id, uint8_t* bits) {
   return ok;
 }
 
+bool loadBigRows(long id, int firstRow, int rows, uint8_t* bits) {
+  FsFile f = SdMan.open(bigPath(id).c_str(), O_RDONLY);
+  if (!f) return false;
+  const int stride = BigW / 8;
+  bool ok = f.seekSet((uint32_t)firstRow * stride) && f.read(bits, (size_t)rows * stride) == rows * stride;
+  f.close();
+  return ok;
+}
+
+bool hasBig(long id) { return SdMan.exists(bigPath(id).c_str()); }
+
 String stagingPath() { return "/BookOrbit/.covers/staging.img"; }
 
 void markNone(long id) {
