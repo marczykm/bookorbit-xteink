@@ -52,9 +52,7 @@ Settings live in `/bookorbit.json` on the SD card (see `config.example.json`). T
 
 **Releasing:** set `FW_VERSION` in `platformio.ini`, commit, then `tools/release.sh` builds the images and publishes the `v<version>` release with `bookorbit-<x4|x3>-<version>.hex` (first install) and `bookorbit-<x4|x3>-<version>-ota.bin` (update image) for each device.
 
-Back up the stock firmware first, then: `esptool --chip esp32c3 --port /dev/cu.usbmodemXXXX write-flash 0x0 bookorbit-x4-0.0.1.bin`. Put `config.json` (see `config.example.json`) on the SD card as `/bookorbit.json`.
-
-Flash layout is in `partitions.csv` (7 MB app, 1 MB `fonts` partition). After flashing the firmware once, write the fonts:
+Flash layout is in `partitions.csv` (two 3.5 MB app slots for updates, 1 MB `fonts` partition). After flashing the firmware once, write the fonts:
 
     tools/flash_fonts.sh /dev/cu.usbmodemXXXX
 
