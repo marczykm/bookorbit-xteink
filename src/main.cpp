@@ -1887,6 +1887,51 @@ static void drawSleepScreen() {
   gfx::flush(EInkDisplay::HALF_REFRESH);  // a full refresh flashes the panel for ~4 s
 }
 
+// Loads the settings and prepares the server client. Library mode does this at start-up; going to sleep from the reader does it
+// on demand (reading mode starts without any of it).
+static bool apiReady = false;
+static bool initApi(String& error) {
+  if (apiReady) return true;
+  if (!config.load(error)) return false;
+  BookOrbit::setActivityHook([](bool active) {  // free the refresh shadow while the radio moves data
+    lastNetUse = millis();
+    if (active) {
+      if (netSaving) {  // back to full speed for the request
+        WiFi.setSleep(false);
+        netSaving = false;
+      }
+      if (netDepth++ == 0) gfx::setLowMemory(true);
+    } else if (netDepth > 0 && --netDepth == 0) {
+      gfx::setLowMemory(false);
+    }
+  });
+  api.configure(config.server, config.insecureTls);
+  if (config.timezone.length()) {
+    setenv("TZ", config.timezone.c_str(), 1);
+    tzset();
+  }
+  apiReady = true;
+  return true;
+}
+
+// Before sleeping: send whatever is waiting (reading progress, sessions) and refresh the statistics, so the other devices and the
+// web reader are up to date while this one is off. Nothing happens when there is nothing to send.
+static void syncBeforeSleep() {
+  String error;
+  if (!initApi(error) || !unsynced()) return;
+  syncModal("Syncing", "Before going to sleep...");
+  if (!goOnline(error, false)) {
+    syncModal("Not synced", "Will retry at the next start");
+    delay(1500);
+    return;
+  }
+  flushProgress();
+  flushSessions();
+  refreshStats();
+  syncModal("Synced", "Going to sleep");
+  delay(500);
+}
+
 // Draws the sleep screen and deep-sleeps; the Power button wakes the device (a fresh boot).
 // An open book is saved first and reopened on wake.
 [[noreturn]] static void goToSleep() {
@@ -1899,6 +1944,7 @@ static void drawSleepScreen() {
     readServerPercent = -1;
     // readPath and readFileId are still set from opening this book
   }
+  syncBeforeSleep();
   if (WiFi.getMode() != WIFI_OFF) WiFi.mode(WIFI_OFF);
   drawSleepScreen();
   gfx::waitIdle();
@@ -2146,25 +2192,7 @@ void setup() {
   }
   openLibraryMagic = 0;
   String error;
-  if (!config.load(error)) fatal("Setup needed", error + "\nSee config.example.json");
-
-  BookOrbit::setActivityHook([](bool active) {  // free the refresh shadow while the radio moves data
-    lastNetUse = millis();
-    if (active) {
-      if (netSaving) {  // back to full speed for the request
-        WiFi.setSleep(false);
-        netSaving = false;
-      }
-      if (netDepth++ == 0) gfx::setLowMemory(true);
-    } else if (netDepth > 0 && --netDepth == 0) {
-      gfx::setLowMemory(false);
-    }
-  });
-  api.configure(config.server, config.insecureTls);
-  if (config.timezone.length()) {
-    setenv("TZ", config.timezone.c_str(), 1);
-    tzset();
-  }
+  if (!initApi(error)) fatal("Setup needed", error + "\nSee config.example.json");
   if (loadCachedPage(0)) {  // show the library right away and connect in the background
     net = Net::Connecting;
     netStart = millis();
